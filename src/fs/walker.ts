@@ -78,9 +78,13 @@ async function walkRecursive(
       } else if (h.kind === 'file') {
         if (!name.toLowerCase().endsWith(EXR_EXT)) continue;
         const fileHandle = h as FileSystemFileHandle;
-        let file: File;
+        // Resolve once just to read size for the tree display. Drop the File
+        // immediately — bytes are re-fetched lazily at load time so we never
+        // hold a stale snapshot.
+        let size: number;
         try {
-          file = await fileHandle.getFile();
+          const file = await fileHandle.getFile();
+          size = file.size;
         } catch {
           /* permission revoked / removed since iteration — drop the entry */
           continue;
@@ -90,8 +94,7 @@ async function walkRecursive(
           path: `${ownPath}/${name}`,
           type: 'file',
           handle: fileHandle,
-          size: file.size,
-          file,
+          size,
         };
         children.push(node);
       }

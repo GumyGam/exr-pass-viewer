@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getPassMetadata } from './api/local';
 import { ComparePanel } from './components/ComparePanel';
 import { PassTabs } from './components/PassTabs';
@@ -11,7 +11,6 @@ import { useMergedPasses, useViewerStore } from './store/viewerStore';
 export function App() {
   const setBackendStatus = useViewerStore((s) => s.setBackendStatus);
   const selectedFiles = useViewerStore((s) => s.selectedFiles);
-  const passesByFile = useViewerStore((s) => s.passesByFile);
   const setFilePasses = useViewerStore((s) => s.setFilePasses);
   const removeFilePasses = useViewerStore((s) => s.removeFilePasses);
   const backendStatus = useViewerStore((s) => s.backendStatus);
@@ -40,24 +39,41 @@ export function App() {
     if (!m || m.family !== 'CRY') clearCryptoPicks();
   }, [activePass, merged, cryptoPicks.length, clearCryptoPicks]);
 
-  // Pull per-file pass metadata as the selection set changes. Files no longer
-  // selected are evicted from the store so panels in other modes don't see
-  // stale data.
+  // Pull per-file pass metadata as the selection set changes. Files no
+  // longer selected are evicted from the store so panels in other modes
+  // don't see stale data.
+  //
+  // `kickedRef` tracks which files have already had a load kicked.
+  // Critically, `passesByFile` is NOT in the dep array: previously the
+  // effect re-ran after every `setFilePasses`, and under StrictMode
+  // double-invoke the initial render queued each file's read twice,
+  // OOM-failing all but the first. With kickedRef the load loop is
+  // idempotent under both StrictMode double-invoke and selection
+  // re-renders.
+  const kickedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (backendStatus !== 'ok') return;
     const selectedSet = new Set(selectedFiles);
-    for (const loaded of Object.keys(passesByFile)) {
-      if (!selectedSet.has(loaded)) removeFilePasses(loaded);
+    // Drop files no longer selected from both the store and the kicked set.
+    for (const previouslyKicked of [...kickedRef.current]) {
+      if (!selectedSet.has(previouslyKicked)) {
+        removeFilePasses(previouslyKicked);
+        kickedRef.current.delete(previouslyKicked);
+      }
     }
+    // Kick a load for every newly-selected file we haven't already kicked.
     for (const file of selectedFiles) {
-      if (passesByFile[file]) continue;
+      if (kickedRef.current.has(file)) continue;
+      kickedRef.current.add(file);
       getPassMetadata(file)
         .then((meta) => setFilePasses(file, meta))
         .catch((err: unknown) => {
           console.error('[exr-pass-viewer] getPassMetadata failed for', file, err);
+          // Permit a retry next time the selection mutates.
+          kickedRef.current.delete(file);
         });
     }
-  }, [selectedFiles, passesByFile, setFilePasses, removeFilePasses, backendStatus]);
+  }, [selectedFiles, setFilePasses, removeFilePasses, backendStatus]);
 
   if (!supported) {
     return (

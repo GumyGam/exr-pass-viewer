@@ -18,8 +18,12 @@ import { createWorkerPool } from '../exr/workerPool';
 // Singleton pool. Agent A's createWorkerPool() owns the worker fleet.
 const pool = createWorkerPool();
 
-// path -> File. Re-registered every time the walker hands us a new tree.
-const fileRegistry = new Map<string, File>();
+// path -> handle. Storing the FileSystemFileHandle (instead of a File snapshot
+// captured during the directory walk) means we always read bytes against a
+// fresh File. Browser File objects derived from FS Access handles can go stale
+// or fail under memory pressure if held for a long time; getting a new one at
+// load time avoids that.
+const fileRegistry = new Map<string, FileSystemFileHandle>();
 
 // path -> cached FileMetadata. The arrayBuffer read + worker transfer cost
 // dominates each render, so we hold metadata once loaded.
@@ -29,22 +33,16 @@ const metaCache = new Map<string, FileMetadata>();
 // from multiple panels so we never read+transfer the same file twice.
 const loadInFlight = new Map<string, Promise<FileMetadata>>();
 
-// Serial load gate. Reading + transferring a 300 MB EXR is bursty work; doing
-// it for 3 files at once peaked at ~1 GB of resident bytes and tripped the
-// browser's per-tab budget on the second file. Loads run one at a time; reads
-// per-pass (small Float32Array per channel) stay parallel.
-let loadChain: Promise<void> = Promise.resolve();
-
-/** Register a path -> File mapping. Call this when the folder walker resolves
- *  a FileTreeNode to a real File via fileHandle.getFile(). Re-registration
- *  with the same path is a no-op; with a different File it evicts caches. */
-export function registerFile(path: string, file: File): void {
+/** Register a path -> FileSystemFileHandle mapping. Call this when the folder
+ *  walker resolves a FileTreeNode. Re-registration with the same handle is a
+ *  no-op; with a different handle it evicts caches. */
+export function registerFile(path: string, handle: FileSystemFileHandle): void {
   const prior = fileRegistry.get(path);
-  if (prior !== file) {
+  if (prior !== handle) {
     metaCache.delete(path);
     pool.dispose(path);
   }
-  fileRegistry.set(path, file);
+  fileRegistry.set(path, handle);
 }
 
 /** Drop a previously-registered file from the in-memory caches. */
@@ -54,12 +52,12 @@ export function unregisterFile(path: string): void {
   pool.dispose(path);
 }
 
-function requireFile(path: string): File {
-  const f = fileRegistry.get(path);
-  if (!f) {
-    throw new Error(`local.ts: no File registered for path "${path}"`);
+function requireHandle(path: string): FileSystemFileHandle {
+  const h = fileRegistry.get(path);
+  if (!h) {
+    throw new Error(`local.ts: no file handle registered for path "${path}"`);
   }
-  return f;
+  return h;
 }
 
 async function loadFromPath(path: string): Promise<FileMetadata> {
@@ -67,16 +65,16 @@ async function loadFromPath(path: string): Promise<FileMetadata> {
   if (cached) return cached;
   const inFlight = loadInFlight.get(path);
   if (inFlight) return inFlight;
-  const f = requireFile(path);
-  // Chain onto loadChain so only one file is being read+transferred at a time.
-  const p = loadChain.then(async () => {
-    const buf = await f.arrayBuffer();
+  const handle = requireHandle(path);
+  const p = (async () => {
+    // Always grab a fresh File from the handle — held File snapshots can be
+    // reclaimed under memory pressure and arrayBuffer() then throws.
+    const file = await handle.getFile();
+    const buf = await file.arrayBuffer();
     const meta = await pool.loadFile(path, buf);
     metaCache.set(path, meta);
     return meta;
-  });
-  // Catch on the chain itself so one bad file doesn't poison subsequent loads.
-  loadChain = p.then(() => undefined, () => undefined);
+  })();
   loadInFlight.set(path, p);
   try {
     return await p;

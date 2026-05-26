@@ -32,7 +32,7 @@ export function Sidebar() {
         // Wipe the registry from any prior root before populating the new one.
         resetRegistry();
         for (const f of collectFiles(t)) {
-          registerFile(f.path, f.file);
+          registerFile(f.path, f.handle);
         }
         setTree(t);
         setLoading(false);

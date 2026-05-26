@@ -18,9 +18,6 @@ export interface FileTreeNode {
   type: 'file';
   handle: FileSystemFileHandle;
   size: number;
-  /** Resolved File at walk time. We cache it on the node so panels can read
-   *  bytes without round-tripping through the handle a second time. */
-  file: File;
 }
 
 export type TreeNode = FolderTreeNode | FileTreeNode;
