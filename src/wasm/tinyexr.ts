@@ -60,6 +60,11 @@ interface EmbindTinyExrInstance {
 
 interface TinyExrModule {
   TinyExr: new () => EmbindTinyExrInstance;
+  /** Emscripten runtime helper exported via EXPORTED_RUNTIME_METHODS so the JS
+   *  side can decode C++ exceptions thrown from Embind bindings. Returns
+   *  `[type, message, stack]`. May be absent on older builds. */
+  getExceptionMessage?: (excPtr: number) => string[] | string;
+  decrementExceptionRefcount?: (excPtr: number) => void;
 }
 
 type TinyExrFactory = (overrides?: {
@@ -117,6 +122,36 @@ async function getModule(): Promise<TinyExrModule> {
   return modulePromise;
 }
 
+/** Coerce an Embind-thrown value (often a plain object with name + message,
+ *  not an Error instance) into a real Error so call sites can log a useful
+ *  string instead of "[object Object]". Uses the module's
+ *  Emscripten-runtime helper `getExceptionMessage` when present so C++
+ *  std::runtime_error("…") thrown inside the bindings surfaces its real
+ *  message instead of just `{excPtr: 12345}`. */
+function toError(err: unknown, mod?: TinyExrModule): Error {
+  if (err instanceof Error) return err;
+  if (typeof err === 'object' && err !== null) {
+    const o = err as { name?: string; message?: string; excPtr?: number };
+    if (typeof o.excPtr === 'number' && mod?.getExceptionMessage) {
+      try {
+        const r = mod.getExceptionMessage(o.excPtr);
+        const msg = Array.isArray(r) ? r.filter(Boolean).join(': ') : String(r);
+        mod.decrementExceptionRefcount?.(o.excPtr);
+        if (msg) return new Error(msg);
+      } catch {
+        /* fall through to other coercion paths */
+      }
+    }
+    if (o.message) return new Error(`${o.name ?? 'WasmError'}: ${o.message}`);
+    try {
+      return new Error(JSON.stringify(err));
+    } catch {
+      return new Error(String(err));
+    }
+  }
+  return new Error(String(err));
+}
+
 /**
  * Parse an in-memory EXR. Returns a reader object scoped to that file;
  * call `dispose()` when done to release the underlying C++ memory.
@@ -128,10 +163,8 @@ export async function loadExr(buf: ArrayBuffer): Promise<ExrReader> {
     const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
     instance.loadFromBuffer(bytes);
   } catch (err) {
-    // Embind throws as `unknown`; normalize to Error.
     instance.delete();
-    if (err instanceof Error) throw err;
-    throw new Error(String(err));
+    throw toError(err, mod);
   }
 
   let disposed = false;

@@ -69,10 +69,18 @@ export function App() {
       if (kickedRef.current.has(file)) continue;
       kickedRef.current.add(file);
       getPassMetadata(file)
-        .then((meta) => setFilePasses(file, meta))
+        .then((meta) => {
+          // Guard against late replies for files the user has since deselected.
+          // Without this, `passesByFile` accumulates ghost entries from loads
+          // that completed after `evictFile` ran.
+          if (!kickedRef.current.has(file)) return;
+          setFilePasses(file, meta);
+        })
         .catch((err: unknown) => {
+          // Stale-load rejections from a deselect mid-flight are expected
+          // and not user-visible; everything else is real.
+          if (err instanceof Error && err.message.startsWith('load stale:')) return;
           console.error('[exr-pass-viewer] getPassMetadata failed for', file, err);
-          // Permit a retry next time the selection mutates.
           kickedRef.current.delete(file);
         });
     }

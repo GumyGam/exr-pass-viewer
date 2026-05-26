@@ -18,6 +18,16 @@ interface LoadedFile {
 // In-worker state.
 const files = new Map<string, LoadedFile>();
 
+// Per-fileKey load promise. Other message handlers (`dispose`, `getChannel`,
+// `cryptoPick`, `cryptoMask`) await this before reading `files` so a dispose
+// that arrives mid-load doesn't run on a still-empty Map and leave an orphan
+// reader behind once the load IIFE finally settles.
+const loadingFiles = new Map<string, Promise<void>>();
+async function waitForLoad(fileKey: string): Promise<void> {
+  const pending = loadingFiles.get(fileKey);
+  if (pending) await pending;
+}
+
 // Channel decode cache: key = `${fileKey}::${channelName}`. We track total
 // bytes and LRU-evict to stay below the cap.
 interface CacheEntry {
@@ -120,7 +130,22 @@ function reply<T>(requestId: number, payload: T, transfer?: Transferable[]): voi
 }
 
 function replyError(requestId: number, err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
+  let message: string;
+  if (err instanceof Error) {
+    message = err.message;
+  } else if (typeof err === 'object' && err !== null) {
+    const o = err as { name?: string; message?: string };
+    if (o.message) message = `${o.name ?? 'WasmError'}: ${o.message}`;
+    else {
+      try {
+        message = JSON.stringify(err);
+      } catch {
+        message = String(err);
+      }
+    }
+  } else {
+    message = String(err);
+  }
   const msg: ErrResp = { type: 'error', requestId, message };
   (self as unknown as Worker).postMessage(msg);
 }
@@ -135,9 +160,9 @@ self.addEventListener('message', (ev: MessageEvent<Req>) => {
   const msg = ev.data;
   switch (msg.type) {
     case 'load': {
-      void (async () => {
+      const { fileKey, buf } = msg.payload;
+      const work = (async () => {
         try {
-          const { fileKey, buf } = msg.payload;
           // Dispose any previous reader under this key before replacing it.
           const prior = files.get(fileKey);
           if (prior) {
@@ -152,74 +177,90 @@ self.addEventListener('message', (ev: MessageEvent<Req>) => {
           replyError(msg.requestId, err);
         }
       })();
+      loadingFiles.set(fileKey, work);
+      void work.finally(() => {
+        if (loadingFiles.get(fileKey) === work) loadingFiles.delete(fileKey);
+      });
       break;
     }
     case 'getChannel': {
-      try {
-        const { fileKey, channelName } = msg.payload;
-        const f = requireFile(fileKey);
-        const cached = cacheGet(fileKey, channelName);
-        if (cached) {
-          // Return a copy so the cache is not detached when transferred.
-          const copy = new Float32Array(cached);
-          reply(msg.requestId, copy, [copy.buffer]);
-        } else {
-          const data = f.reader.getChannelData(channelName);
-          cachePut(fileKey, channelName, data);
-          // Same: send a transferable copy, keep the cached original.
-          const copy = new Float32Array(data);
-          reply(msg.requestId, copy, [copy.buffer]);
+      void (async () => {
+        try {
+          const { fileKey, channelName } = msg.payload;
+          await waitForLoad(fileKey);
+          const f = requireFile(fileKey);
+          const cached = cacheGet(fileKey, channelName);
+          if (cached) {
+            const copy = new Float32Array(cached);
+            reply(msg.requestId, copy, [copy.buffer]);
+          } else {
+            const data = f.reader.getChannelData(channelName);
+            cachePut(fileKey, channelName, data);
+            const copy = new Float32Array(data);
+            reply(msg.requestId, copy, [copy.buffer]);
+          }
+        } catch (err) {
+          replyError(msg.requestId, err);
         }
-      } catch (err) {
-        replyError(msg.requestId, err);
-      }
+      })();
       break;
     }
     case 'cryptoPick': {
-      try {
-        const { fileKey, activePassName, x, y } = msg.payload;
-        const f = requireFile(fileKey);
-        const result: CryptoPickResult = pickAtPixel(
-          cachingReader(fileKey, f.reader),
-          activePassName,
-          x,
-          y,
-        );
-        reply(msg.requestId, result);
-      } catch (err) {
-        replyError(msg.requestId, err);
-      }
+      void (async () => {
+        try {
+          const { fileKey, activePassName, x, y } = msg.payload;
+          await waitForLoad(fileKey);
+          const f = requireFile(fileKey);
+          const result: CryptoPickResult = pickAtPixel(
+            cachingReader(fileKey, f.reader),
+            activePassName,
+            x,
+            y,
+          );
+          reply(msg.requestId, result);
+        } catch (err) {
+          replyError(msg.requestId, err);
+        }
+      })();
       break;
     }
     case 'cryptoMask': {
-      try {
-        const { fileKey, activePassName, hashesHex } = msg.payload;
-        const f = requireFile(fileKey);
-        const mask = renderMask(
-          cachingReader(fileKey, f.reader),
-          activePassName,
-          hashesHex,
-        );
-        // Transfer the mask buffer so we avoid a copy on the wire.
-        reply(msg.requestId, mask, [mask.buffer]);
-      } catch (err) {
-        replyError(msg.requestId, err);
-      }
+      void (async () => {
+        try {
+          const { fileKey, activePassName, hashesHex } = msg.payload;
+          await waitForLoad(fileKey);
+          const f = requireFile(fileKey);
+          const mask = renderMask(
+            cachingReader(fileKey, f.reader),
+            activePassName,
+            hashesHex,
+          );
+          reply(msg.requestId, mask, [mask.buffer]);
+        } catch (err) {
+          replyError(msg.requestId, err);
+        }
+      })();
       break;
     }
     case 'dispose': {
-      try {
-        const { fileKey } = msg.payload;
-        const f = files.get(fileKey);
-        if (f) {
-          f.reader.dispose();
-          files.delete(fileKey);
+      void (async () => {
+        try {
+          const { fileKey } = msg.payload;
+          // Wait for any in-flight load to finish before disposing, so we
+          // don't no-op while the load IIFE is mid-await and then have it
+          // install an orphan reader after we replied OK.
+          await waitForLoad(fileKey);
+          const f = files.get(fileKey);
+          if (f) {
+            f.reader.dispose();
+            files.delete(fileKey);
+          }
+          cacheDropFile(fileKey);
+          reply(msg.requestId, null);
+        } catch (err) {
+          replyError(msg.requestId, err);
         }
-        cacheDropFile(fileKey);
-        reply(msg.requestId, null);
-      } catch (err) {
-        replyError(msg.requestId, err);
-      }
+      })();
       break;
     }
   }

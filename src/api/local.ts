@@ -55,9 +55,15 @@ export function unregisterFile(path: string): void {
 /** Evict a file's loaded state (WASM reader + decoded channel cache + metadata
  *  cache) without forgetting its handle. Use when a file is deselected: the
  *  user can re-select to reload, but in the meantime we release the worker's
- *  ~300 MB WASM heap and decoded channel arrays so memory doesn't pile up. */
+ *  ~300 MB WASM heap and decoded channel arrays so memory doesn't pile up.
+ *
+ *  Critically: drop `loadInFlight[path]` too. Otherwise a deselect-during-load
+ *  followed by re-select returns the stale in-flight promise whose worker-side
+ *  state has already been disposed, and the next channel fetch errors out
+ *  with "unknown fileKey". */
 export function evictFile(path: string): void {
   metaCache.delete(path);
+  loadInFlight.delete(path);
   pool.dispose(path);
 }
 
@@ -75,20 +81,30 @@ async function loadFromPath(path: string): Promise<FileMetadata> {
   const inFlight = loadInFlight.get(path);
   if (inFlight) return inFlight;
   const handle = requireHandle(path);
+  // Capture the in-flight slot up front. If evictFile fires while we're in
+  // flight, `loadInFlight.get(path)` will no longer match this promise — the
+  // resolve path checks that and reports a stale result instead of polluting
+  // metaCache for a file the user no longer wants.
+  let myPromise!: Promise<FileMetadata>;
   const p = (async () => {
-    // Always grab a fresh File from the handle — held File snapshots can be
-    // reclaimed under memory pressure and arrayBuffer() then throws.
     const file = await handle.getFile();
     const buf = await file.arrayBuffer();
     const meta = await pool.loadFile(path, buf);
+    if (loadInFlight.get(path) !== myPromise) {
+      // We were evicted mid-flight. The worker just installed a now-orphan
+      // reader; tell it to drop it again.
+      pool.dispose(path);
+      throw new Error(`load stale: ${path}`);
+    }
     metaCache.set(path, meta);
     return meta;
   })();
+  myPromise = p;
   loadInFlight.set(path, p);
   try {
     return await p;
   } finally {
-    loadInFlight.delete(path);
+    if (loadInFlight.get(path) === p) loadInFlight.delete(path);
   }
 }
 

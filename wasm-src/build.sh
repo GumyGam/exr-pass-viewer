@@ -79,6 +79,7 @@ em++ \
   -s MAXIMUM_MEMORY=2147483648 \
   -s STACK_SIZE=5242880 \
   -s DISABLE_EXCEPTION_CATCHING=0 \
+  -s "EXPORTED_RUNTIME_METHODS=['getExceptionMessage','incrementExceptionRefcount','decrementExceptionRefcount']" \
   -fexceptions \
   -o "$OUT_MJS"
 
