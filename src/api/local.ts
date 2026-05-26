@@ -29,6 +29,12 @@ const metaCache = new Map<string, FileMetadata>();
 // from multiple panels so we never read+transfer the same file twice.
 const loadInFlight = new Map<string, Promise<FileMetadata>>();
 
+// Serial load gate. Reading + transferring a 300 MB EXR is bursty work; doing
+// it for 3 files at once peaked at ~1 GB of resident bytes and tripped the
+// browser's per-tab budget on the second file. Loads run one at a time; reads
+// per-pass (small Float32Array per channel) stay parallel.
+let loadChain: Promise<void> = Promise.resolve();
+
 /** Register a path -> File mapping. Call this when the folder walker resolves
  *  a FileTreeNode to a real File via fileHandle.getFile(). Re-registration
  *  with the same path is a no-op; with a different File it evicts caches. */
@@ -62,12 +68,15 @@ async function loadFromPath(path: string): Promise<FileMetadata> {
   const inFlight = loadInFlight.get(path);
   if (inFlight) return inFlight;
   const f = requireFile(path);
-  const p = (async () => {
+  // Chain onto loadChain so only one file is being read+transferred at a time.
+  const p = loadChain.then(async () => {
     const buf = await f.arrayBuffer();
     const meta = await pool.loadFile(path, buf);
     metaCache.set(path, meta);
     return meta;
-  })();
+  });
+  // Catch on the chain itself so one bad file doesn't poison subsequent loads.
+  loadChain = p.then(() => undefined, () => undefined);
   loadInFlight.set(path, p);
   try {
     return await p;

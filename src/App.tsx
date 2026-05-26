@@ -53,8 +53,8 @@ export function App() {
       if (passesByFile[file]) continue;
       getPassMetadata(file)
         .then((meta) => setFilePasses(file, meta))
-        .catch(() => {
-          /* per-file load failures surface as 'pass not present' in panels */
+        .catch((err: unknown) => {
+          console.error('[exr-pass-viewer] getPassMetadata failed for', file, err);
         });
     }
   }, [selectedFiles, passesByFile, setFilePasses, removeFilePasses, backendStatus]);
