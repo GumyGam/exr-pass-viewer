@@ -79,22 +79,39 @@ async function getModule(): Promise<TinyExrModule> {
     typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
       ? import.meta.env.BASE_URL
       : '/';
-
-  // Construct an absolute URL with origin so Vite's dev server treats the
-  // import as fully external and skips its public/ check. Files in public/
-  // are served as-is at runtime; the @vite-ignore + origin prefix together
-  // keep Vite out of the loop.
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const moduleUrl = `${origin}${baseUrl}tinyexr.mjs`;
 
+  // Vite v8 refuses dynamic imports of paths that resolve into public/,
+  // even with /* @vite-ignore */. Workaround: fetch the JS as text, wrap
+  // it in a Blob, and dynamic-import the blob: URL. Vite cannot statically
+  // analyze a blob: URL constructed at runtime, so the import slips past
+  // its plugin pipeline cleanly. The blob URL is revoked after use; the
+  // module instance survives because it's already been imported.
   modulePromise = (async () => {
-    const mod = (await import(/* @vite-ignore */ moduleUrl)) as {
-      default: TinyExrFactory;
-    };
-    const factory = mod.default;
-    return factory({
-      locateFile: (path: string) => `${origin}${baseUrl}${path}`,
-    });
+    const response = await fetch(moduleUrl);
+    if (!response.ok) {
+      throw new Error(`fetch ${moduleUrl} → HTTP ${response.status}`);
+    }
+    const source = await response.text();
+    const blob = new Blob([source], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+      const mod = (await import(/* @vite-ignore */ blobUrl)) as {
+        default: TinyExrFactory;
+      };
+      const factory = mod.default;
+      if (typeof factory !== 'function') {
+        throw new Error('tinyexr.mjs: default export is not a factory');
+      }
+      return factory({
+        // emscripten asks for tinyexr.wasm here; route it back to the
+        // public/ URL so the WASM binary loads from its real location.
+        locateFile: (path: string) => `${origin}${baseUrl}${path}`,
+      });
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
   })();
 
   return modulePromise;
