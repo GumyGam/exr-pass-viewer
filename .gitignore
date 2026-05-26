@@ -1,0 +1,19 @@
+node_modules
+dist
+dist-ssr
+*.local
+*.log
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.swp
+
+# WASM build artifacts (built by build-wasm.sh; committed binaries live in public/)
+wasm-src/build/
+wasm-src/tinyexr/build/
+
+# Vendored tinyexr clone — handled in a follow-up commit, see wasm-src/README.md
+wasm-src/tinyexr/

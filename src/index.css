@@ -1,0 +1,15 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+html, body {
+  margin: 0;
+  background: #0d0d0f;
+  color: #e6e6e6;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
