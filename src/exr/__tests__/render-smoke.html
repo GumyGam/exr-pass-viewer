@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>EXR renderer smoke test</title>
+<style>
+  body {
+    font: 14px/1.4 -apple-system, system-ui, sans-serif;
+    margin: 16px;
+    background: #1a1a1a;
+    color: #eaeaea;
+  }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  #log {
+    background: #111;
+    border: 1px solid #333;
+    padding: 8px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    margin: 8px 0;
+    max-height: 200px;
+    overflow: auto;
+  }
+  #canvas-host {
+    border: 1px solid #333;
+    display: inline-block;
+    margin-top: 8px;
+    background: #000;
+  }
+  canvas { display: block; max-width: 100%; }
+  input[type=file] { color: #eaeaea; }
+  label { margin-right: 8px; }
+</style>
+</head>
+<body>
+<h1>EXR renderer smoke test (Agent B)</h1>
+<p>
+  Pick a multilayer EXR; the page will load it via tinyexr, find a
+  ViewLayer.Combined RGBA pass, and tonemap it on the GPU. Renderer health
+  check, not a visual ground-truth test.
+</p>
+<p>
+  <label>EXR file:</label>
+  <input type="file" id="picker" accept=".exr" />
+  <label style="margin-left:16px;">Viz mode:</label>
+  <select id="viz">
+    <option value="tonemap" selected>tonemap</option>
+    <option value="color">color</option>
+    <option value="falsecolor">falsecolor</option>
+    <option value="normal">normal</option>
+    <option value="position">position</option>
+    <option value="vector">vector</option>
+    <option value="uv">uv</option>
+    <option value="hashid">hashid</option>
+    <option value="crypto">crypto</option>
+    <option value="normalize">normalize</option>
+    <option value="raw">raw</option>
+  </select>
+</p>
+<div id="log"></div>
+<div id="canvas-host"></div>
+
+<script type="module">
+// Vite dev server applies the configured base path (`/exr-pass-viewer/`)
+// to module imports. Importing from `/src/...` would 404; we use the prefixed
+// path. To open this page, run `pnpm dev` and visit
+// http://localhost:5173/exr-pass-viewer/src/exr/__tests__/render-smoke.html
+import { loadExr } from '/exr-pass-viewer/src/wasm/tinyexr.ts';
+import { renderPass } from '/exr-pass-viewer/src/exr/viz.ts';
+import { listPasses } from '/exr-pass-viewer/src/exr/passes.ts';
+
+const logEl = document.getElementById('log');
+const canvasHost = document.getElementById('canvas-host');
+const vizSelect = document.getElementById('viz');
+
+function log(...args) {
+  logEl.textContent += args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ') + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+let lastReader = null;
+let lastMeta = null;
+let lastFileName = '';
+
+document.getElementById('picker').addEventListener('change', async (ev) => {
+  const file = ev.target.files?.[0];
+  if (!file) return;
+  lastFileName = file.name;
+  await loadAndRender(file);
+});
+
+vizSelect.addEventListener('change', async () => {
+  if (lastReader && lastMeta) {
+    await renderCurrent();
+  }
+});
+
+async function loadAndRender(file) {
+  logEl.textContent = '';
+  log(`File: ${file.name} (${file.size} bytes)`);
+
+  try {
+    const buf = await file.arrayBuffer();
+    const t0 = performance.now();
+    if (lastReader) lastReader.dispose();
+    lastReader = await loadExr(buf);
+    const t1 = performance.now();
+    log(`tinyexr loaded in ${(t1 - t0).toFixed(1)}ms`);
+
+    lastMeta = listPasses(lastReader);
+    log(`Dimensions: ${lastMeta.width} x ${lastMeta.height}`);
+    log(`Passes found: ${lastMeta.passes.length}`);
+    for (const p of lastMeta.passes.slice(0, 8)) {
+      log(`  - ${p.display_name}  family=${p.family}  viz=${p.viz_default}  comps=${p.components.join(',')}`);
+    }
+    if (lastMeta.passes.length > 8) log(`  ... and ${lastMeta.passes.length - 8} more`);
+
+    await renderCurrent();
+  } catch (err) {
+    log(`ERROR: ${err && err.message ? err.message : String(err)}`);
+    if (err && err.stack) log(err.stack);
+  }
+}
+
+async function renderCurrent() {
+  // Find a candidate pass for the chosen viz mode. Prefer a pass whose
+  // viz_default matches; otherwise just pick the first pass and try.
+  const desired = vizSelect.value;
+  let pass = lastMeta.passes.find(p => p.viz_default === desired);
+  if (!pass) {
+    pass = lastMeta.passes.find(p => p.display_name.toLowerCase() === 'combined') || lastMeta.passes[0];
+    log(`(no pass classified as "${desired}"; using ${pass.display_name})`);
+  }
+  log(`Rendering pass "${pass.name}" as viz="${desired}"`);
+
+  // Pull each component as a Float32Array.
+  const channelData = pass.components.map(c => {
+    const channelName = c === 'value' && !pass.name.includes('.')
+      ? pass.name
+      : `${pass.name}.${c}`;
+    try {
+      return lastReader.getChannelData(channelName);
+    } catch (err) {
+      log(`  channel ${channelName} read failed: ${err.message}`);
+      throw err;
+    }
+  });
+  log(`  channels: ${pass.components.length} x ${channelData[0].length} floats`);
+
+  const t0 = performance.now();
+  const off = renderPass(
+    {
+      width: lastMeta.width,
+      height: lastMeta.height,
+      channelData,
+      pass,
+    },
+    { viz: desired, exposure: 0, gamma: 2.2, cacheKey: `${lastFileName}::${pass.name}` },
+  );
+  const t1 = performance.now();
+  log(`  render: ${(t1 - t0).toFixed(1)}ms`);
+
+  // Replace any previous canvas; copy from the OffscreenCanvas via
+  // transferToImageBitmap + drawImage to a visible canvas.
+  const bitmap = off.transferToImageBitmap();
+  canvasHost.replaceChildren();
+  const visible = document.createElement('canvas');
+  visible.width = bitmap.width;
+  visible.height = bitmap.height;
+  const ctx = visible.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  canvasHost.appendChild(visible);
+  log(`  drawn: ${bitmap.width} x ${bitmap.height}`);
+}
+
+</script>
+</body>
+</html>
