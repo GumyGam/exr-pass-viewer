@@ -80,9 +80,12 @@ async function getModule(): Promise<TinyExrModule> {
       ? import.meta.env.BASE_URL
       : '/';
 
-  // Use @vite-ignore so Vite does not try to resolve the URL at build time;
-  // the .mjs lives in `public/` and is fetched at runtime by the browser.
-  const moduleUrl = `${baseUrl}tinyexr.mjs`;
+  // Construct an absolute URL with origin so Vite's dev server treats the
+  // import as fully external and skips its public/ check. Files in public/
+  // are served as-is at runtime; the @vite-ignore + origin prefix together
+  // keep Vite out of the loop.
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const moduleUrl = `${origin}${baseUrl}tinyexr.mjs`;
 
   modulePromise = (async () => {
     const mod = (await import(/* @vite-ignore */ moduleUrl)) as {
@@ -90,7 +93,7 @@ async function getModule(): Promise<TinyExrModule> {
     };
     const factory = mod.default;
     return factory({
-      locateFile: (path: string) => `${baseUrl}${path}`,
+      locateFile: (path: string) => `${origin}${baseUrl}${path}`,
     });
   })();
 
