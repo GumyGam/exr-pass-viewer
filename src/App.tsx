@@ -13,6 +13,7 @@ export function App() {
   const selectedFiles = useViewerStore((s) => s.selectedFiles);
   const setFilePasses = useViewerStore((s) => s.setFilePasses);
   const removeFilePasses = useViewerStore((s) => s.removeFilePasses);
+  const setFileStatus = useViewerStore((s) => s.setFileStatus);
   const backendStatus = useViewerStore((s) => s.backendStatus);
   const activePass = useViewerStore((s) => s.activePass);
   const cryptoPicks = useViewerStore((s) => s.cryptoPicks);
@@ -68,6 +69,7 @@ export function App() {
     for (const file of selectedFiles) {
       if (kickedRef.current.has(file)) continue;
       kickedRef.current.add(file);
+      setFileStatus(file, { kind: 'loading' });
       getPassMetadata(file)
         .then((meta) => {
           // Guard against late replies for files the user has since deselected.
@@ -75,12 +77,16 @@ export function App() {
           // that completed after `evictFile` ran.
           if (!kickedRef.current.has(file)) return;
           setFilePasses(file, meta);
+          setFileStatus(file, null);
         })
         .catch((err: unknown) => {
           // Stale-load rejections from a deselect mid-flight are expected
           // and not user-visible; everything else is real.
           if (err instanceof Error && err.message.startsWith('load stale:')) return;
           console.error('[exr-pass-viewer] getPassMetadata failed for', file, err);
+          const message =
+            err instanceof Error ? err.message : typeof err === 'string' ? err : 'load failed';
+          setFileStatus(file, { kind: 'error', message });
           kickedRef.current.delete(file);
         });
     }

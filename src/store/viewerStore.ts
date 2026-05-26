@@ -47,6 +47,14 @@ export type ViewerState = {
   setFilePasses: (file: string, data: FileMetadata) => void;
   removeFilePasses: (file: string) => void;
 
+  /** Per-file load state for the metadata fetch. Allows panels to show
+   *  "Loading…" / "Error: …" badges instead of going blank silently. */
+  fileStatus: Record<string, { kind: 'loading' } | { kind: 'error'; message: string }>;
+  setFileStatus: (
+    file: string,
+    s: { kind: 'loading' } | { kind: 'error'; message: string } | null,
+  ) => void;
+
   panZoom: PanZoom;
   setPanZoom: (pz: PanZoom) => void;
   resetPanZoom: () => void;
@@ -129,7 +137,18 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     set((s) => {
       const next = { ...s.passesByFile };
       delete next[file];
-      return { passesByFile: next };
+      const nextStatus = { ...s.fileStatus };
+      delete nextStatus[file];
+      return { passesByFile: next, fileStatus: nextStatus };
+    }),
+
+  fileStatus: {},
+  setFileStatus: (file, s) =>
+    set((state) => {
+      const next = { ...state.fileStatus };
+      if (s === null) delete next[file];
+      else next[file] = s;
+      return { fileStatus: next };
     }),
 
   panZoom: { x: 0, y: 0, scale: 1 },

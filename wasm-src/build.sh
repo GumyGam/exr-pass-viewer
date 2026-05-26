@@ -75,8 +75,8 @@ em++ \
   -s SINGLE_FILE=0 \
   -s ENVIRONMENT=web,worker,node \
   -s EXPORT_NAME=createTinyExrModule \
-  -s INITIAL_MEMORY=67108864 \
-  -s MAXIMUM_MEMORY=2147483648 \
+  -s INITIAL_MEMORY=268435456 \
+  -s MAXIMUM_MEMORY=4294967296 \
   -s STACK_SIZE=5242880 \
   -s DISABLE_EXCEPTION_CATCHING=0 \
   -s "EXPORTED_RUNTIME_METHODS=['getExceptionMessage','incrementExceptionRefcount','decrementExceptionRefcount']" \

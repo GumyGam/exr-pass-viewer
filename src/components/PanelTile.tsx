@@ -26,6 +26,7 @@ export function PanelTile({ file }: { file: string }) {
   const exposure = useViewerStore((s) => s.exposure);
   const gamma = useViewerStore((s) => s.gamma);
   const passesData = useViewerStore((s) => s.passesByFile[file]);
+  const fileStatus = useViewerStore((s) => s.fileStatus[file]);
   const focusedFile = useViewerStore((s) => s.focusedFile);
   const setFocusedFile = useViewerStore((s) => s.setFocusedFile);
   const setHoverPixel = useViewerStore((s) => s.setHoverPixel);
@@ -314,9 +315,17 @@ export function PanelTile({ file }: { file: string }) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
+        {!passesData && fileStatus?.kind === 'loading' && (
+          <div className="panel-loading">loading file…</div>
+        )}
+        {!passesData && fileStatus?.kind === 'error' && (
+          <div className="panel-error">load failed — {fileStatus.message}</div>
+        )}
         {passMissing && <div className="panel-missing">pass not present</div>}
-        {!passMissing && img.kind === 'loading' && <div className="panel-loading">decoding…</div>}
-        {!passMissing && img.kind === 'error' && (
+        {!passMissing && passesData && img.kind === 'loading' && (
+          <div className="panel-loading">decoding…</div>
+        )}
+        {!passMissing && passesData && img.kind === 'error' && (
           <div className="panel-error">render failed — {img.message}</div>
         )}
         {!passMissing && (
