@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getPassMetadata } from './api/local';
+import { evictFile, getPassMetadata } from './api/local';
 import { ComparePanel } from './components/ComparePanel';
 import { PassTabs } from './components/PassTabs';
 import { Sidebar } from './components/Sidebar';
@@ -54,10 +54,13 @@ export function App() {
   useEffect(() => {
     if (backendStatus !== 'ok') return;
     const selectedSet = new Set(selectedFiles);
-    // Drop files no longer selected from both the store and the kicked set.
+    // Drop files no longer selected. Also evict their worker-side state
+    // (WASM reader + decoded channel cache + metaCache) so memory doesn't
+    // accumulate across selection changes.
     for (const previouslyKicked of [...kickedRef.current]) {
       if (!selectedSet.has(previouslyKicked)) {
         removeFilePasses(previouslyKicked);
+        evictFile(previouslyKicked);
         kickedRef.current.delete(previouslyKicked);
       }
     }

@@ -52,6 +52,15 @@ export function unregisterFile(path: string): void {
   pool.dispose(path);
 }
 
+/** Evict a file's loaded state (WASM reader + decoded channel cache + metadata
+ *  cache) without forgetting its handle. Use when a file is deselected: the
+ *  user can re-select to reload, but in the meantime we release the worker's
+ *  ~300 MB WASM heap and decoded channel arrays so memory doesn't pile up. */
+export function evictFile(path: string): void {
+  metaCache.delete(path);
+  pool.dispose(path);
+}
+
 function requireHandle(path: string): FileSystemFileHandle {
   const h = fileRegistry.get(path);
   if (!h) {
