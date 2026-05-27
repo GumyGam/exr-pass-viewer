@@ -244,11 +244,15 @@ export function listPasses(reader: ExrReader): FileMetadata {
     const components = [...(groups.get(passName) as Set<string>)].sort(compareComponents);
     const display = displayName(passName);
     const viz = classifyViz(display);
+    // ID-shaped names render with the `raw` shader (pre-baked RGB-per-object)
+    // but still belong in the CRY family in the UI: same conceptual purpose
+    // as a cryptomatte (object segmentation), same tab tag, same picker UX.
+    const family: PassFamily = looksLikeIdPass(display) ? 'CRY' : vizToFamily(viz);
     return {
       name: passName,
       display_name: display,
       components,
-      family: vizToFamily(viz),
+      family,
       viz_default: viz,
     };
   });
