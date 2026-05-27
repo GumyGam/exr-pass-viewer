@@ -105,13 +105,31 @@ function displayName(passName: string): string {
   return passName.slice(dot + 1);
 }
 
+/** Does `name` look like an object-id pass (e.g. "ObjectID", "MaterialID",
+ *  "object_id")? Designed to NOT match "indirect", "guide", "wide", "Hide". */
+function looksLikeIdPass(name: string): boolean {
+  // "ID" as a standalone word — start/end or non-letter boundaries.
+  if (/(^|[^A-Za-z])ID($|[^A-Za-z])/.test(name)) return true;
+  // CamelCase suffix: "ObjectID", "MaterialID", "passID".
+  if (/[a-z]ID($|[^a-z])/.test(name)) return true;
+  // snake_case: "object_id", "asset_id_2".
+  if (/(^|_)id(_|$)/i.test(name)) return true;
+  return false;
+}
+
 /**
  * Classify a pass into one of the viz modes.
  *
- * This is a near-verbatim port of `_classify_viz` from io.py, with ONE
- * spec change: cryptomatte detection uses `.includes('crypto')` instead of
- * `.startsWith('crypto')`. That makes CryptoMaterial / CryptoObject /
- * CryptoAsset / CryptoLight / future Crypto* all activate the picker.
+ * This is a near-verbatim port of `_classify_viz` from io.py, with TWO
+ * spec changes:
+ *   1. Cryptomatte detection uses `.includes('crypto')` instead of
+ *      `.startsWith('crypto')`. That makes CryptoMaterial / CryptoObject /
+ *      CryptoAsset / CryptoLight / future Crypto* all activate the picker.
+ *   2. ID-shaped pass names (ObjectID, MaterialID, object_id, …) also map
+ *      to `crypto` so users get the colored hash viz + picker UI on
+ *      renderer-specific ID streams that don't carry the "crypto" prefix.
+ *      Click-to-pick still requires the file's `cryptomatte/*` header
+ *      attributes — if they're missing, the pick is a no-op.
  *
  * Ordering matters: e.g. a hypothetical "DenoisingNormal" pass should fall
  * into `normal`, not into the HDR catch-all that contains "denoising albedo".
@@ -121,6 +139,10 @@ function classifyViz(displayNameStr: string): VizMode {
 
   // SPEC CHANGE vs Python: substring, not prefix.
   if (nl.includes('crypto')) return 'crypto';
+
+  // SPEC CHANGE vs Python: also treat ObjectID/MaterialID/etc as crypto so
+  // the picker UI activates and the hash viz renders.
+  if (looksLikeIdPass(displayNameStr)) return 'crypto';
 
   if (nl.includes('denoising normal') || nl.startsWith('normal') || nl.includes('normalcamera')) {
     return 'normal';
@@ -151,7 +173,7 @@ function classifyViz(displayNameStr: string): VizMode {
   }
 
   const hdrTerms = [
-    'combined', 'noisy image',
+    'combined', 'noisy image', 'beauty',
     'diffuse direct', 'diffuse indirect',
     'glossy direct', 'glossy indirect',
     'transmission direct', 'transmission indirect',
