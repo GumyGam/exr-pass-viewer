@@ -8,14 +8,7 @@
 
 import { loadExr, type ExrReader } from '../../wasm/tinyexr';
 import { listPasses, type FileMetadata } from '../passes';
-import {
-  isCryptomatteSubPass,
-  pickAtPixel,
-  pickColorAtPixel,
-  renderColorMask,
-  renderMask,
-  type CryptoPickResult,
-} from '../crypto';
+import { pickAtPixel, renderMask, type CryptoPickResult } from '../crypto';
 
 interface LoadedFile {
   reader: ExrReader;
@@ -218,12 +211,12 @@ self.addEventListener('message', (ev: MessageEvent<Req>) => {
           const { fileKey, activePassName, x, y } = msg.payload;
           await waitForLoad(fileKey);
           const f = requireFile(fileKey);
-          const reader = cachingReader(fileKey, f.reader);
-          // Real Cryptomatte sub-pass → hash-based pick; otherwise an
-          // ObjectID/MaterialID-style pre-baked RGB pass → color-match pick.
-          const result: CryptoPickResult = isCryptomatteSubPass(reader, activePassName)
-            ? pickAtPixel(reader, activePassName, x, y)
-            : pickColorAtPixel(reader, activePassName, x, y);
+          const result: CryptoPickResult = pickAtPixel(
+            cachingReader(fileKey, f.reader),
+            activePassName,
+            x,
+            y,
+          );
           reply(msg.requestId, result);
         } catch (err) {
           replyError(msg.requestId, err);
@@ -237,10 +230,11 @@ self.addEventListener('message', (ev: MessageEvent<Req>) => {
           const { fileKey, activePassName, hashesHex } = msg.payload;
           await waitForLoad(fileKey);
           const f = requireFile(fileKey);
-          const reader = cachingReader(fileKey, f.reader);
-          const mask = isCryptomatteSubPass(reader, activePassName)
-            ? renderMask(reader, activePassName, hashesHex)
-            : renderColorMask(reader, activePassName, hashesHex);
+          const mask = renderMask(
+            cachingReader(fileKey, f.reader),
+            activePassName,
+            hashesHex,
+          );
           reply(msg.requestId, mask, [mask.buffer]);
         } catch (err) {
           replyError(msg.requestId, err);
