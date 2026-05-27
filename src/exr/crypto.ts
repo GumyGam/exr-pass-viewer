@@ -156,6 +156,127 @@ function typeForPass(reader: ExrReader, activePassName: string): CryptoType {
   throw new Error(`no Cryptomatte type ${typeName} in file`);
 }
 
+/** True if the active pass is a real Cryptomatte sub-pass (name ends in two
+ *  digits AND a matching `cryptomatte/<id>/manifest` lives on the file). When
+ *  false, callers should use the RGB color-match fallback (pickColorAtPixel /
+ *  renderColorMask) — that's what AE's Cryptomatte plugin does for ObjectID
+ *  passes whose data is pre-baked RGB-per-object rather than hashed ids. */
+export function isCryptomatteSubPass(reader: ExrReader, activePassName: string): boolean {
+  const typeName = stripSubPassSuffix(activePassName);
+  if (!typeName) return false;
+  const types = parseManifests(reader);
+  return types.some((t) => t.type_name === typeName);
+}
+
+// ---------------------------------------------------------------------------
+// RGB color-match fallback for non-Cryptomatte ID passes.
+// ---------------------------------------------------------------------------
+//
+// Many renderers emit an "ObjectID" or "MaterialID" pass that's just a
+// pre-baked RGB color per object — no Cryptomatte manifest, no ranked sub-
+// passes. AE's Cryptomatte plugin picks on these by exact float-tuple match
+// at the clicked pixel; we do the same.
+//
+// The pick is keyed by an 8-bit-quantized RGB hex string ("ff80c0") so it
+// fits the existing CryptoCandidate.hash_hex slot. Mask render compares the
+// 8-bit-quantized tuple per pixel against the selected set.
+
+function find3Channels(
+  reader: ExrReader,
+  passName: string,
+): { r: Float32Array; g: Float32Array; b: Float32Array } {
+  const channelNames = reader.getChannels().map((c) => c.name);
+  const findOne = (comp: string): string => {
+    const upper = `${passName}.${comp.toUpperCase()}`;
+    if (channelNames.includes(upper)) return upper;
+    const lower = `${passName}.${comp.toLowerCase()}`;
+    if (channelNames.includes(lower)) return lower;
+    throw new Error(`channel ${upper} (or .${comp.toLowerCase()}) not found`);
+  };
+  return {
+    r: reader.getChannelData(findOne('R')),
+    g: reader.getChannelData(findOne('G')),
+    b: reader.getChannelData(findOne('B')),
+  };
+}
+
+function rgbToHex8(r: number, g: number, b: number): string {
+  const q = (v: number) => {
+    const c = Math.max(0, Math.min(1, v));
+    return Math.round(c * 255);
+  };
+  const hex = (n: number) => n.toString(16).padStart(2, '0');
+  return `${hex(q(r))}${hex(q(g))}${hex(q(b))}`;
+}
+
+function parseHex8(hex: string): { r: number; g: number; b: number } | null {
+  if (hex.length !== 6) return null;
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+  return { r, g, b };
+}
+
+/** RGB color-match pick. Reads R/G/B at (x, y), 8-bit-quantizes, returns
+ *  a single candidate keyed by the hex tuple. */
+export function pickColorAtPixel(
+  reader: ExrReader,
+  activePassName: string,
+  x: number,
+  y: number,
+): CryptoPickResult {
+  const { width, height } = reader.getDimensions();
+  if (x < 0 || y < 0 || x >= width || y >= height) {
+    throw new Error(`(${x},${y}) out of bounds`);
+  }
+  const { r, g, b } = find3Channels(reader, activePassName);
+  const idx = y * width + x;
+  const hex = rgbToHex8(r[idx], g[idx], b[idx]);
+  return {
+    type_name: activePassName,
+    x,
+    y,
+    candidates: [{ hash_hex: hex, name: null, coverage: 1.0 }],
+  };
+}
+
+/** RGB color-match mask. Pixel is 1 iff its 8-bit-quantized RGB matches any
+ *  selected hex tuple. */
+export function renderColorMask(
+  reader: ExrReader,
+  activePassName: string,
+  hashesHex: string[],
+): Float32Array {
+  const { width, height } = reader.getDimensions();
+  const total = width * height;
+
+  const selected = new Set<number>();
+  for (const h of hashesHex) {
+    const parsed = parseHex8(h);
+    if (!parsed) continue;
+    // Pack r/g/b into a single 24-bit int for cheap Set lookup.
+    selected.add((parsed.r << 16) | (parsed.g << 8) | parsed.b);
+  }
+
+  const mask = new Float32Array(total);
+  if (selected.size === 0) return mask;
+
+  const { r, g, b } = find3Channels(reader, activePassName);
+  if (r.length !== total) {
+    throw new Error(`color-mask: channel length ${r.length} != ${total}`);
+  }
+
+  for (let i = 0; i < total; i++) {
+    const rq = Math.max(0, Math.min(255, Math.round(r[i] * 255)));
+    const gq = Math.max(0, Math.min(255, Math.round(g[i] * 255)));
+    const bq = Math.max(0, Math.min(255, Math.round(b[i] * 255)));
+    const key = (rq << 16) | (gq << 8) | bq;
+    if (selected.has(key)) mask[i] = 1.0;
+  }
+  return mask;
+}
+
 /** Resolve the float32 channel data for a sub-pass, returning aligned
  *  per-component arrays. Each sub-pass has channels suffixed .R .G .B .A
  *  (or lowercase). Throws if any expected channel is missing. */
