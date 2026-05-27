@@ -125,11 +125,13 @@ function looksLikeIdPass(name: string): boolean {
  *   1. Cryptomatte detection uses `.includes('crypto')` instead of
  *      `.startsWith('crypto')`. That makes CryptoMaterial / CryptoObject /
  *      CryptoAsset / CryptoLight / future Crypto* all activate the picker.
- *   2. ID-shaped pass names (ObjectID, MaterialID, object_id, …) also map
- *      to `crypto` so users get the colored hash viz + picker UI on
- *      renderer-specific ID streams that don't carry the "crypto" prefix.
- *      Click-to-pick still requires the file's `cryptomatte/*` header
- *      attributes — if they're missing, the pick is a no-op.
+ *   2. ID-shaped pass names (ObjectID, MaterialID, object_id, …) map to
+ *      `raw` — most renderers that emit `ObjectID` write a pre-baked RGB
+ *      color-per-object into R/G/B (A=1). That's what AE's Cryptomatte
+ *      plugin shows in its preview. Routing to `crypto` viz here was
+ *      wrong: that shader treats channel 0 as bit-cast hash + channel 1
+ *      as coverage, which produces black for any pixel where R==0
+ *      (dirt, floor, …) because of the NaN-avoidance branch.
  *
  * Ordering matters: e.g. a hypothetical "DenoisingNormal" pass should fall
  * into `normal`, not into the HDR catch-all that contains "denoising albedo".
@@ -140,9 +142,9 @@ function classifyViz(displayNameStr: string): VizMode {
   // SPEC CHANGE vs Python: substring, not prefix.
   if (nl.includes('crypto')) return 'crypto';
 
-  // SPEC CHANGE vs Python: also treat ObjectID/MaterialID/etc as crypto so
-  // the picker UI activates and the hash viz renders.
-  if (looksLikeIdPass(displayNameStr)) return 'crypto';
+  // SPEC CHANGE vs Python: ObjectID/MaterialID/etc are pre-baked RGB color
+  // streams in most renderers — pass them through raw.
+  if (looksLikeIdPass(displayNameStr)) return 'raw';
 
   if (nl.includes('denoising normal') || nl.startsWith('normal') || nl.includes('normalcamera')) {
     return 'normal';
