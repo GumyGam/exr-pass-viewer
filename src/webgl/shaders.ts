@@ -59,6 +59,21 @@ vec3 linearToSrgb(vec3 x) {
   );
 }
 
+// Tonemap a linear beauty triple to display space exactly like tonemapFrag:
+// exposure stops, then sRGB curve (or pow 1/gamma when gamma != 2.2). Used by
+// the composite shaders so the base matches a standalone Beauty render before
+// the effect is applied on top.
+vec3 toneBeauty(vec3 src, float exposure, float gamma) {
+  vec3 x = src * exp2(exposure);
+  vec3 y;
+  if (abs(gamma - 2.2) < 1e-6) {
+    y = linearToSrgb(x);
+  } else {
+    y = pow(max(x, vec3(0.0)), vec3(1.0 / gamma));
+  }
+  return clamp(y, 0.0, 1.0);
+}
+
 // HSV -> RGB. Matches numpy implementation in viz.py (_hsv_to_rgb).
 vec3 hsvToRgb(float h, float s, float v) {
   float h6 = mod(h, 1.0) * 6.0;
@@ -358,6 +373,75 @@ void main() {
   ${pickRgb}
   vec3 y = clamp(src, 0.0, 1.0);
   outColor = vec4(y, 1.0);
+}
+`;
+}
+
+// ----- COMPOSITE: AO MULTIPLY --------------------------------------------------
+// Beauty RGB in uCh0..2 (linear), AO scalar in uCh3. Display-space (comp-style)
+// multiply: tonemap beauty first, then darken by the AO factor.
+//   aoVal = uInvert ? (1 - ao) : ao
+//   out   = tonemap(beauty) * mix(1.0, aoVal, uStrength)
+// uStrength in [0,2] — values >1 overdrive (push crevices past true AO).
+export function compositeAoFrag(): string {
+  return fragHead(4, 'uniform float uExposure;\nuniform float uGamma;\nuniform float uStrength;\nuniform float uInvert;') + /* glsl */ `
+
+void main() {
+  vec3 beauty = toneBeauty(vec3(sampleCh(uCh0), sampleCh(uCh1), sampleCh(uCh2)), uExposure, uGamma);
+  float ao = sampleCh(uCh3);
+  float aoVal = (uInvert > 0.5) ? (1.0 - ao) : ao;
+  float f = mix(1.0, aoVal, uStrength);
+  outColor = vec4(clamp(beauty * f, 0.0, 1.0), 1.0);
+}
+`;
+}
+
+// ----- COMPOSITE: DEPTH FOCUS BAND ---------------------------------------------
+// Beauty RGB in uCh0..2, depth scalar in uCh3. Depth is percentile-normalized
+// CPU-side into uRange=(lo,hi). A focus band around uFocus stays full beauty;
+// pixels outside fade to a uDim floor.
+//   d    = clamp((depth - lo) / (hi - lo), 0, 1)
+//   m    = 1 - smoothstep(0, uWidth, |d - uFocus|)   (1 in focus -> 0 outside)
+//   out  = tonemap(beauty) * mix(uDim, 1.0, m)
+export function compositeDepthFrag(): string {
+  const extras =
+    'uniform float uExposure;\nuniform float uGamma;\nuniform vec2 uRange;\nuniform float uFocus;\nuniform float uWidth;\nuniform float uDim;';
+  return fragHead(4, extras) + /* glsl */ `
+
+void main() {
+  vec3 beauty = toneBeauty(vec3(sampleCh(uCh0), sampleCh(uCh1), sampleCh(uCh2)), uExposure, uGamma);
+  float depth = sampleCh(uCh3);
+  float d = clamp((depth - uRange.x) / max(uRange.y - uRange.x, 1e-8), 0.0, 1.0);
+  float diff = abs(d - uFocus);
+  float m = 1.0 - smoothstep(0.0, max(uWidth, 1e-4), diff);
+  float f = mix(uDim, 1.0, m);
+  outColor = vec4(clamp(beauty * f, 0.0, 1.0), 1.0);
+}
+`;
+}
+
+// ----- COMPOSITE: NORMAL RELIGHT -----------------------------------------------
+// Beauty RGB in uCh0..2, normal XYZ ([-1,1]) in uCh3..5. A movable directional
+// light uLightDir lights a lambert term; uMode picks clay (neutral grey, geometry
+// QA) vs modulate (relight the actual beauty).
+//   N      = normalize(normalXYZ)        (fallback +Z if degenerate)
+//   shade  = uAmbient + (1 - uAmbient) * max(dot(N, L), 0)
+//   out    = uMode>0.5 ? tonemap(beauty)*shade : vec3(0.7)*shade
+export function compositeNormalFrag(): string {
+  const extras =
+    'uniform float uExposure;\nuniform float uGamma;\nuniform vec3 uLightDir;\nuniform float uAmbient;\nuniform float uMode;';
+  return fragHead(6, extras) + /* glsl */ `
+
+void main() {
+  vec3 beauty = toneBeauty(vec3(sampleCh(uCh0), sampleCh(uCh1), sampleCh(uCh2)), uExposure, uGamma);
+  vec3 N = vec3(sampleCh(uCh3), sampleCh(uCh4), sampleCh(uCh5));
+  float len = length(N);
+  N = (len > 1e-6) ? N / len : vec3(0.0, 0.0, 1.0);
+  vec3 L = normalize(uLightDir);
+  float lambert = max(dot(N, L), 0.0);
+  float shade = uAmbient + (1.0 - uAmbient) * lambert;
+  vec3 outc = (uMode > 0.5) ? (beauty * shade) : (vec3(0.7) * shade);
+  outColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
 }
 `;
 }

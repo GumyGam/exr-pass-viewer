@@ -31,6 +31,8 @@ export interface DrawCall {
   uniformsFloat?: Record<string, number>;
   /** vec2 uniforms (xy pair). */
   uniformsVec2?: Record<string, [number, number]>;
+  /** vec3 uniforms (xyz triple). */
+  uniformsVec3?: Record<string, [number, number, number]>;
 }
 
 export class Renderer {
@@ -134,6 +136,13 @@ export class Renderer {
       for (const [name, value] of Object.entries(call.uniformsVec2)) {
         const loc = this.uniform(program, name);
         if (loc) gl.uniform2f(loc, value[0], value[1]);
+      }
+    }
+    // vec3 uniforms.
+    if (call.uniformsVec3) {
+      for (const [name, value] of Object.entries(call.uniformsVec3)) {
+        const loc = this.uniform(program, name);
+        if (loc) gl.uniform3f(loc, value[0], value[1], value[2]);
       }
     }
 

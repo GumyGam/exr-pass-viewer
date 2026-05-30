@@ -10,11 +10,14 @@
 // `passChannelMapToArray()` helper converts the worker pool's
 // `Map<channelName, Float32Array>` shape into that array.
 
-import type { PassInfo, VizMode } from './passes';
+import type { CompositeKind, PassInfo, VizMode } from './passes';
 import { Renderer } from '../webgl/renderer';
 import type { DrawCall } from '../webgl/renderer';
 import {
   colorFrag,
+  compositeAoFrag,
+  compositeDepthFrag,
+  compositeNormalFrag,
   cryptoFrag,
   falsecolorFrag,
   hashidFrag,
@@ -129,6 +132,126 @@ export function renderMask(
     srcWidth: width,
     srcHeight: height,
   };
+  r.render(call);
+  return r.canvas;
+}
+
+/** Per-component channel data for a composite render. `beautyChannels` is the
+ *  base HDR pass's components (in pass order); `effectChannels` is the AO /
+ *  depth / normal pass's components. */
+export interface CompositeInput {
+  width: number;
+  height: number;
+  beautyChannels: Float32Array[];
+  effectChannels: Float32Array[];
+}
+
+export interface CompositeParams {
+  kind: CompositeKind;
+  /** Exposure stops applied to the beauty base (display-space blend). */
+  exposure: number;
+  /** Gamma applied to the beauty base. */
+  gamma: number;
+  maxWidth?: number;
+  // AO
+  aoStrength?: number;
+  aoInvert?: boolean;
+  // depth
+  depthFocus?: number;
+  depthWidth?: number;
+  depthDim?: number;
+  /** Stable cache key for the depth percentile range. */
+  depthCacheKey?: string;
+  // normal
+  lightDir?: [number, number, number];
+  ambient?: number;
+  normalMode?: 'clay' | 'modulate';
+}
+
+/** Expand a beauty pass's channels into exactly three (r,g,b) arrays, matching
+ *  the replicate/pad convention the standalone tonemap shader uses. */
+function beautyTriple(
+  ch: Float32Array[],
+  total: number,
+): [Float32Array, Float32Array, Float32Array] {
+  if (ch.length >= 3) return [ch[0]!, ch[1]!, ch[2]!];
+  if (ch.length === 2) return [ch[0]!, ch[1]!, new Float32Array(total)];
+  const v = ch[0] ?? new Float32Array(total);
+  return [v, v, v];
+}
+
+/**
+ * Composite an AO / depth / normal pass on top of a beauty base in display
+ * space. Returns the renderer's canvas (transfer immediately, like renderPass).
+ */
+export function renderComposite(input: CompositeInput, params: CompositeParams): OffscreenCanvas {
+  const { width, height, beautyChannels, effectChannels } = input;
+  const total = width * height;
+  const exposure = params.exposure;
+  const gamma = params.gamma;
+
+  let outW = width;
+  let outH = height;
+  if (params.maxWidth && width > params.maxWidth) {
+    const scale = params.maxWidth / width;
+    outW = params.maxWidth;
+    outH = Math.max(1, Math.round(height * scale));
+  }
+
+  const [br, bg, bb] = beautyTriple(beautyChannels, total);
+
+  let call: DrawCall;
+  if (params.kind === 'ao') {
+    const ao = effectChannels[0] ?? new Float32Array(total);
+    call = {
+      fragSrc: compositeAoFrag(),
+      channelData: [br, bg, bb, ao],
+      srcWidth: width,
+      srcHeight: height,
+      uniformsFloat: {
+        uExposure: exposure,
+        uGamma: gamma,
+        uStrength: params.aoStrength ?? 1,
+        uInvert: params.aoInvert ? 1 : 0,
+      },
+    };
+  } else if (params.kind === 'depth') {
+    const depth = effectChannels[0] ?? new Float32Array(total);
+    const [lo, hi] = computePercentileRange(depth, params.depthCacheKey);
+    call = {
+      fragSrc: compositeDepthFrag(),
+      channelData: [br, bg, bb, depth],
+      srcWidth: width,
+      srcHeight: height,
+      uniformsFloat: {
+        uExposure: exposure,
+        uGamma: gamma,
+        uFocus: params.depthFocus ?? 0.5,
+        uWidth: params.depthWidth ?? 0.1,
+        uDim: params.depthDim ?? 0.15,
+      },
+      uniformsVec2: { uRange: [lo, hi] },
+    };
+  } else {
+    const nx = effectChannels[0] ?? new Float32Array(total);
+    const ny = effectChannels[1] ?? new Float32Array(total);
+    const nz = effectChannels[2] ?? new Float32Array(total);
+    call = {
+      fragSrc: compositeNormalFrag(),
+      channelData: [br, bg, bb, nx, ny, nz],
+      srcWidth: width,
+      srcHeight: height,
+      uniformsFloat: {
+        uExposure: exposure,
+        uGamma: gamma,
+        uAmbient: params.ambient ?? 0.15,
+        uMode: params.normalMode === 'modulate' ? 1 : 0,
+      },
+      uniformsVec3: { uLightDir: params.lightDir ?? [0, 0.7, 0.7] },
+    };
+  }
+
+  const r = getRenderer(outW, outH);
   r.render(call);
   return r.canvas;
 }

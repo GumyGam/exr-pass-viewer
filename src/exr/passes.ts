@@ -259,3 +259,66 @@ export function listPasses(reader: ExrReader): FileMetadata {
 
   return { width, height, passes };
 }
+
+// ----- Composite-over-beauty support ------------------------------------------
+//
+// Three pass kinds can be composited on top of a beauty/HDR base instead of
+// rendered standalone: AO (multiply), depth/mist (focus band), normal
+// (relight). Detection is by display name + family, independent of viz_default
+// so the "composite over beauty" toggle shows on exactly these passes.
+
+/** Which composite mode a pass supports, or null if it's not composite-capable. */
+export type CompositeKind = 'ao' | 'depth' | 'normal';
+
+/** AO is detected strictly by name: an "occlusion" substring or a standalone
+ *  "AO" token (so "AO", "AmbientOcclusion", "ao_pass" match; "shadow",
+ *  "taa" do not). Mirrors the looksLikeIdPass boundary-guard style. */
+function looksLikeAoPass(displayNameStr: string): boolean {
+  const nl = displayNameStr.toLowerCase();
+  if (nl.includes('occlusion')) return true;
+  if (/(^|[^a-z])ao([^a-z]|$)/i.test(displayNameStr)) return true;
+  return false;
+}
+
+/** Depth is detected by name: a "depth" or "mist" substring. */
+function looksLikeDepthPass(displayNameStr: string): boolean {
+  const nl = displayNameStr.toLowerCase();
+  return nl.includes('depth') || nl.includes('mist');
+}
+
+/**
+ * Classify a pass for composite-over-beauty. Ordering: AO and depth are
+ * name-matched (they live in the SCALAR family alongside generic scalars),
+ * normal is family-matched. Returns null for everything else.
+ */
+export function compositeKindFor(pass: Pick<PassInfo, 'display_name' | 'family'>): CompositeKind | null {
+  if (looksLikeAoPass(pass.display_name)) return 'ao';
+  if (looksLikeDepthPass(pass.display_name)) return 'depth';
+  if (pass.family === 'NRM') return 'normal';
+  return null;
+}
+
+/**
+ * Resolve which pass is the beauty base, given the available passes (any
+ * HDR-tonemap pass is a candidate). Preference order:
+ *   Combined > Beauty > other HDR > "*_Noisy"/"noisy" variant (last).
+ * Returns the display_name to use as base, or null if no HDR pass exists.
+ */
+export function resolveBeautyBase(
+  passes: Pick<PassInfo, 'display_name' | 'family'>[],
+): string | null {
+  const hdr = passes.filter((p) => p.family === 'HDR');
+  if (hdr.length === 0) return null;
+  const isNoisy = (n: string) => /noisy/i.test(n);
+  const byName = (needle: string) =>
+    hdr.find((p) => p.display_name.toLowerCase() === needle && !isNoisy(p.display_name)) ??
+    hdr.find((p) => p.display_name.toLowerCase().includes(needle) && !isNoisy(p.display_name));
+  const combined = byName('combined');
+  if (combined) return combined.display_name;
+  const beauty = byName('beauty');
+  if (beauty) return beauty.display_name;
+  const clean = hdr.find((p) => !isNoisy(p.display_name));
+  if (clean) return clean.display_name;
+  // Only noisy variants exist — fall back to the first.
+  return hdr[0]!.display_name;
+}

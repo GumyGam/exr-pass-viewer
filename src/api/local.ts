@@ -11,8 +11,8 @@
 // against the path here so call sites can keep passing strings.
 
 import type { CryptoPickResult } from '../exr/crypto';
-import type { FileMetadata, PassInfo, VizMode } from '../exr/passes';
-import { renderMask, renderPass } from '../exr/viz';
+import type { CompositeKind, FileMetadata, PassInfo, VizMode } from '../exr/passes';
+import { renderComposite, renderMask, renderPass } from '../exr/viz';
 import { createWorkerPool } from '../exr/workerPool';
 
 // Singleton pool. Agent A's createWorkerPool() owns the worker fleet.
@@ -162,6 +162,64 @@ export async function renderPassToCanvas(
       // Stable cacheKey so percentile-based viz modes (falsecolor / normalize /
       // position / vector) don't recompute percentiles on every render.
       cacheKey: `${path}::${pass.name}`,
+    },
+  );
+  return canvas.transferToImageBitmap();
+}
+
+export interface CompositeRenderOpts {
+  kind: CompositeKind;
+  exposure?: number;
+  gamma?: number;
+  maxWidth?: number;
+  // AO
+  aoStrength?: number;
+  aoInvert?: boolean;
+  // depth
+  depthFocus?: number;
+  depthWidth?: number;
+  depthDim?: number;
+  // normal
+  lightDir?: [number, number, number];
+  ambient?: number;
+  normalMode?: 'clay' | 'modulate';
+}
+
+/** Composite an AO / depth / normal effect pass over a beauty base pass.
+ *  Fetches both passes' channels (worker-cached after first decode) and renders
+ *  on the main thread. */
+export async function renderCompositeToCanvas(
+  path: string,
+  basePass: PassInfo,
+  effectPass: PassInfo,
+  opts: CompositeRenderOpts,
+): Promise<ImageBitmap> {
+  const meta = await loadFromPath(path);
+  const [beauty, effect] = await Promise.all([
+    getPassChannels(path, basePass),
+    getPassChannels(path, effectPass),
+  ]);
+  const canvas = renderComposite(
+    {
+      width: meta.width,
+      height: meta.height,
+      beautyChannels: beauty.array,
+      effectChannels: effect.array,
+    },
+    {
+      kind: opts.kind,
+      exposure: opts.exposure ?? 0,
+      gamma: opts.gamma ?? 2.2,
+      maxWidth: opts.maxWidth,
+      aoStrength: opts.aoStrength,
+      aoInvert: opts.aoInvert,
+      depthFocus: opts.depthFocus,
+      depthWidth: opts.depthWidth,
+      depthDim: opts.depthDim,
+      depthCacheKey: `${path}::${effectPass.name}::p2_p98::0`,
+      lightDir: opts.lightDir,
+      ambient: opts.ambient,
+      normalMode: opts.normalMode,
     },
   );
   return canvas.transferToImageBitmap();

@@ -967,6 +967,103 @@ select {
   border-color: var(--danger);
 }
 
+/* Composite-over-beauty controls — top-right, only on AO/depth/normal passes */
+.panel-body.relight-mode {
+  cursor: crosshair;
+}
+.panel-body.relight-mode.dragging {
+  cursor: grabbing;
+}
+.composite-panel {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-width: 188px;
+  max-width: 260px;
+  background: rgba(11, 12, 14, 0.92);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  z-index: 12;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.composite-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.composite-toggle .lbl {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-3);
+  font-weight: 600;
+}
+.composite-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.composite-row:first-of-type {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.composite-k {
+  flex: 0 0 52px;
+  color: var(--text-2);
+}
+.composite-v {
+  flex: 0 0 32px;
+  text-align: right;
+  color: var(--text-0);
+}
+.composite-row input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.composite-sel {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg-1, #16181c);
+  color: var(--text-0);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 3px;
+}
+.composite-check {
+  cursor: pointer;
+}
+.composite-modes {
+  gap: 4px;
+}
+.composite-mode {
+  flex: 1 1 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.composite-mode.on {
+  border-color: var(--border-strong);
+  color: var(--text-0);
+  background: rgba(255, 255, 255, 0.06);
+}
+.composite-hint {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-style: italic;
+}
+
 /* Hover chip — follows cursor, shows active pass values for focused panel only */
 .hover-chip {
   position: absolute;

@@ -21,6 +21,56 @@ export type PanZoom = { x: number; y: number; scale: number };
 
 export type PixelValues = { file: string; x: number; y: number; values: Record<string, number> };
 
+// Per-file composite-over-beauty settings. AO / depth / normal passes can be
+// composited on top of a beauty base instead of rendered standalone. Kept
+// per-file (not global like exposure/gamma) so each panel scrubs the focus
+// plane / light independently — matches the per-panel picker UX.
+export type CompositeSettings = {
+  /** Whether the composite-over-beauty mode is on for this file. */
+  enabled: boolean;
+  /** Base pass display_name override. null = auto-resolve (Combined > Beauty …). */
+  base: string | null;
+  // AO
+  aoStrength: number; // 0..2 (1 = true multiply, >1 overdrive)
+  aoInvert: boolean;
+  // depth
+  depthFocus: number; // 0..1 normalized focus plane
+  depthWidth: number; // 0..1 band half-width / falloff
+  depthDim: number; // 0..1 out-of-focus brightness floor
+  // normal relight
+  normalMode: 'clay' | 'modulate';
+  lightAzimuth: number; // degrees 0..360
+  lightElevation: number; // degrees -90..90
+  ambient: number; // 0..1
+};
+
+export const DEFAULT_COMPOSITE: CompositeSettings = {
+  enabled: false,
+  base: null,
+  aoStrength: 1,
+  aoInvert: false,
+  depthFocus: 0.5,
+  depthWidth: 0.1,
+  depthDim: 0.15,
+  normalMode: 'clay',
+  lightAzimuth: 90,
+  lightElevation: 45,
+  ambient: 0.15,
+};
+
+/** Convert azimuth/elevation degrees to a light direction in the normals'
+ *  space. Azimuth sweeps in the image plane (x right, y up), elevation lifts
+ *  toward +Z (toward viewer for view-space normals). */
+export function lightDirFromAngles(
+  azimuthDeg: number,
+  elevationDeg: number,
+): [number, number, number] {
+  const az = (azimuthDeg * Math.PI) / 180;
+  const el = (elevationDeg * Math.PI) / 180;
+  const c = Math.cos(el);
+  return [c * Math.cos(az), c * Math.sin(az), Math.sin(el)];
+}
+
 export type ViewerState = {
   /** Root directory picked via the FS Access API. null on first load (or in
    *  unsupported browsers — the App renders the support gate instead). */
@@ -78,6 +128,11 @@ export type ViewerState = {
   cryptoPicks: CryptoCandidate[];
   toggleCryptoPick: (c: CryptoCandidate) => void;
   clearCryptoPicks: () => void;
+
+  // Per-file composite-over-beauty settings (AO/depth/normal). Read with the
+  // DEFAULT_COMPOSITE fallback; setComposite merges a partial patch.
+  compositeByFile: Record<string, CompositeSettings>;
+  setComposite: (file: string, patch: Partial<CompositeSettings>) => void;
 
   // Runtime status (formerly backendStatus). Calls go through src/api/local.ts
   // — there is no HTTP backend. 'ok' means FS Access + WASM are available;
@@ -177,6 +232,15 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     }
   },
   clearCryptoPicks: () => set({ cryptoPicks: [] }),
+
+  compositeByFile: {},
+  setComposite: (file, patch) =>
+    set((s) => ({
+      compositeByFile: {
+        ...s.compositeByFile,
+        [file]: { ...DEFAULT_COMPOSITE, ...s.compositeByFile[file], ...patch },
+      },
+    })),
 
   backendStatus: 'unknown',
   backendVersion: null,

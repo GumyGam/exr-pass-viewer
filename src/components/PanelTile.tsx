@@ -2,10 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   pickAtPixel,
   pixelValues,
+  renderCompositeToCanvas,
   renderCryptoMask,
   renderPassToCanvas,
 } from '../api/local';
-import { useMergedPasses, useViewerStore } from '../store/viewerStore';
+import { compositeKindFor, resolveBeautyBase } from '../exr/passes';
+import {
+  DEFAULT_COMPOSITE,
+  lightDirFromAngles,
+  useMergedPasses,
+  useViewerStore,
+} from '../store/viewerStore';
 import { basename, formatFloat, formatScale, sceneName } from '../utils/format';
 import { transformStyle, zoomAt } from '../utils/panZoom';
 
@@ -41,6 +48,9 @@ export function PanelTile({ file }: { file: string }) {
   const toggleCryptoPick = useViewerStore((s) => s.toggleCryptoPick);
   const clearCryptoPicks = useViewerStore((s) => s.clearCryptoPicks);
 
+  const composite = useViewerStore((s) => s.compositeByFile[file]) ?? DEFAULT_COMPOSITE;
+  const setComposite = useViewerStore((s) => s.setComposite);
+
   const passInfo = useMemo(() => {
     if (!activePass) return null;
     const m = merged.find((p) => p.display_name === activePass);
@@ -62,11 +72,37 @@ export function PanelTile({ file }: { file: string }) {
   const passComponents = localPass?.components ?? [];
   const viz = passInfo?.vizDefault ?? 'tonemap';
 
+  // Composite-over-beauty: which kind (if any) the active pass supports, the
+  // auto-resolved beauty base, and the file-local PassInfo for the chosen base.
+  const compositeKind =
+    activePass && passInfo
+      ? compositeKindFor({ display_name: activePass, family: passInfo.family })
+      : null;
+  // Base candidates are this file's own HDR passes (compositing is per-file),
+  // so the dropdown can never offer a base that isn't present here.
+  const hdrPasses = useMemo(
+    () => (passesData?.passes ?? []).filter((p) => p.family === 'HDR'),
+    [passesData],
+  );
+  const autoBase = useMemo(() => resolveBeautyBase(passesData?.passes ?? []), [passesData]);
+  const baseName = composite.base ?? autoBase;
+  const basePass = useMemo(() => {
+    if (!baseName || !passesData) return null;
+    return passesData.passes.find((p) => p.display_name === baseName) ?? null;
+  }, [baseName, passesData]);
+  const compositeActive = !!compositeKind && composite.enabled && !!basePass && !!localPass;
+  const relightActive = compositeKind === 'normal' && composite.enabled;
+
   const [img, setImg] = useState<ImgState>({ kind: 'idle' });
   const [chipPos, setChipPos] = useState<{ x: number; y: number } | null>(null);
   const debounceRef = useRef<number | null>(null);
   const pixelDebounceRef = useRef<number | null>(null);
   const dragRef = useRef<{ startX: number; startY: number; px: number; py: number; moved: boolean } | null>(null);
+  // Active relight light-aim drag (normal composite mode). Holds the gesture
+  // start + the azimuth/elevation at grab time.
+  const lightDragRef = useRef<{ startX: number; startY: number; az: number; el: number } | null>(null);
+  // Spacebar-held flag — lets space+drag pan while left-drag aims the light.
+  const spaceRef = useRef(false);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imgNaturalRef = useRef<{ w: number; h: number } | null>(null);
@@ -76,33 +112,63 @@ export function PanelTile({ file }: { file: string }) {
     panZoomRef.current = panZoom;
   }, [panZoom]);
 
-  // Render the active pass (or mask) into the panel's <canvas>. Debounced so
-  // rapid slider drags don't queue a dozen WebGL jobs. Cancellation is by
-  // `cancelled` flag — once an outdated job's bitmap arrives, we drop it.
+  // Track spacebar so space+drag pans while left-drag aims the relight light.
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceRef.current = true;
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceRef.current = false;
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, []);
+
+  // Render the active pass / mask / composite into the panel's <canvas>.
+  // Standalone renders are debounced (150ms) so slider drags don't queue a
+  // dozen WebGL jobs; composite renders coalesce on requestAnimationFrame
+  // instead so the relight light-drag and depth-focus scrub feel live (channel
+  // arrays are already worker-cached, so each frame just re-uploads + draws).
+  // Cancellation is by `cancelled` flag — an outdated job's bitmap is dropped.
   useEffect(() => {
     if (!passInfo || !activePass || !localPass) {
       setImg({ kind: 'idle' });
       return;
     }
-    if (debounceRef.current !== null) {
-      window.clearTimeout(debounceRef.current);
-    }
     let cancelled = false;
-    setImg({ kind: 'loading' });
-    debounceRef.current = window.setTimeout(() => {
-      const job = cryptoMaskActive
-        ? renderCryptoMask(
-            file,
-            localPass,
-            cryptoPicks.map((p) => p.hash_hex),
-            { maxWidth: RENDER_MAX_WIDTH },
-          )
-        : renderPassToCanvas(file, localPass, {
-            viz,
-            exposure,
-            gamma,
-            maxWidth: RENDER_MAX_WIDTH,
-          });
+    // Composite re-renders coalesce on rAF during light-drag / focus-scrub —
+    // don't flip to the 'loading' state each frame (it would blank the canvas).
+    // Keep the prior frame visible and let the next bitmap swap in.
+    if (!compositeActive) setImg({ kind: 'loading' });
+
+    const run = () => {
+      let job: Promise<ImageBitmap>;
+      if (compositeActive && basePass && compositeKind) {
+        job = renderCompositeToCanvas(file, basePass, localPass, {
+          kind: compositeKind,
+          exposure,
+          gamma,
+          maxWidth: RENDER_MAX_WIDTH,
+          aoStrength: composite.aoStrength,
+          aoInvert: composite.aoInvert,
+          depthFocus: composite.depthFocus,
+          depthWidth: composite.depthWidth,
+          depthDim: composite.depthDim,
+          lightDir: lightDirFromAngles(composite.lightAzimuth, composite.lightElevation),
+          ambient: composite.ambient,
+          normalMode: composite.normalMode,
+        });
+      } else if (cryptoMaskActive) {
+        job = renderCryptoMask(file, localPass, cryptoPicks.map((p) => p.hash_hex), {
+          maxWidth: RENDER_MAX_WIDTH,
+        });
+      } else {
+        job = renderPassToCanvas(file, localPass, { viz, exposure, gamma, maxWidth: RENDER_MAX_WIDTH });
+      }
       job
         .then((bitmap) => {
           if (cancelled) {
@@ -137,12 +203,36 @@ export function PanelTile({ file }: { file: string }) {
           if (cancelled) return;
           setImg({ kind: 'error', message: (e as Error).message || 'render failed' });
         });
-    }, DEBOUNCE_MS);
+    };
+
+    if (compositeActive) {
+      const raf = requestAnimationFrame(run);
+      return () => {
+        cancelled = true;
+        cancelAnimationFrame(raf);
+      };
+    }
+    if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(run, DEBOUNCE_MS);
     return () => {
       cancelled = true;
       if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
     };
-  }, [file, activePass, localPass, passInfo, viz, exposure, gamma, cryptoMaskActive, cryptoPicks]);
+  }, [
+    file,
+    activePass,
+    localPass,
+    passInfo,
+    viz,
+    exposure,
+    gamma,
+    cryptoMaskActive,
+    cryptoPicks,
+    compositeActive,
+    compositeKind,
+    basePass,
+    composite,
+  ]);
 
   // Native wheel listener (passive: false) — React's synthetic wheel handler is
   // passive in React 17+, so e.preventDefault() inside onWheel silently fails
@@ -164,8 +254,24 @@ export function PanelTile({ file }: { file: string }) {
   }, [setPanZoom]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    // Middle button or space-held always pans. In relight mode, plain left-drag
+    // aims the light instead.
+    if (e.button !== 0 && e.button !== 1) return;
+    // Ignore presses that land on the floating controls (composite panel /
+    // crypto picker) — otherwise dragging a slider would also aim the light or
+    // start a pan, and could strand the gesture ref.
+    if ((e.target as HTMLElement).closest('.composite-panel, .crypto-picker')) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const wantPan = e.button === 1 || spaceRef.current || !relightActive;
+    if (!wantPan && e.button === 0) {
+      lightDragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        az: composite.lightAzimuth,
+        el: composite.lightElevation,
+      };
+      return;
+    }
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
@@ -176,6 +282,14 @@ export function PanelTile({ file }: { file: string }) {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (lightDragRef.current) {
+      const d = lightDragRef.current;
+      // Drag right -> sweep azimuth; drag up -> raise elevation. ~0.5°/px.
+      const az = d.az + (e.clientX - d.startX) * 0.5;
+      const el = Math.max(-90, Math.min(90, d.el - (e.clientY - d.startY) * 0.5));
+      setComposite(file, { lightAzimuth: az, lightElevation: el });
+      return;
+    }
     if (dragRef.current) {
       const d = dragRef.current;
       const dx = e.clientX - d.startX;
@@ -225,6 +339,10 @@ export function PanelTile({ file }: { file: string }) {
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (lightDragRef.current) {
+      lightDragRef.current = null;
+      return;
+    }
     const d = dragRef.current;
     dragRef.current = null;
     // Treat a near-zero-movement press-release as a click. On Crypto passes,
@@ -310,7 +428,7 @@ export function PanelTile({ file }: { file: string }) {
       </div>
       <div
         ref={bodyRef}
-        className={`panel-body ${dragRef.current ? 'dragging' : ''} ${isCrypto ? 'crypto-mode' : ''}`}
+        className={`panel-body ${dragRef.current ? 'dragging' : ''} ${isCrypto ? 'crypto-mode' : ''} ${relightActive ? 'relight-mode' : ''}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -379,6 +497,155 @@ export function PanelTile({ file }: { file: string }) {
                 </div>
               ))
             )}
+          </div>
+        )}
+        {compositeKind && (
+          <div className="composite-panel mono">
+            <label className="composite-toggle">
+              <input
+                type="checkbox"
+                checked={composite.enabled}
+                onChange={(e) => setComposite(file, { enabled: e.target.checked })}
+              />
+              <span className="lbl">
+                {compositeKind === 'ao'
+                  ? 'AO · OVER BEAUTY'
+                  : compositeKind === 'depth'
+                    ? 'DEPTH FOCUS · OVER BEAUTY'
+                    : 'RELIGHT · OVER BEAUTY'}
+              </span>
+            </label>
+            {composite.enabled &&
+              (!basePass ? (
+                <div className="composite-hint">no beauty / HDR pass to composite over</div>
+              ) : (
+                <>
+                  <div className="composite-row">
+                    <span className="composite-k">base</span>
+                    <select
+                      className="composite-sel"
+                      value={baseName ?? ''}
+                      onChange={(e) => setComposite(file, { base: e.target.value })}
+                    >
+                      {hdrPasses.map((p) => (
+                        <option key={p.display_name} value={p.display_name}>
+                          {p.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {compositeKind === 'ao' && (
+                    <>
+                      <div className="composite-row">
+                        <span className="composite-k">strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={2}
+                          step={0.01}
+                          value={composite.aoStrength}
+                          onChange={(e) =>
+                            setComposite(file, { aoStrength: e.target.valueAsNumber })
+                          }
+                        />
+                        <span className="composite-v">{composite.aoStrength.toFixed(2)}</span>
+                      </div>
+                      <label className="composite-row composite-check">
+                        <input
+                          type="checkbox"
+                          checked={composite.aoInvert}
+                          onChange={(e) => setComposite(file, { aoInvert: e.target.checked })}
+                        />
+                        <span className="composite-k">invert</span>
+                      </label>
+                    </>
+                  )}
+
+                  {compositeKind === 'depth' && (
+                    <>
+                      <div className="composite-row">
+                        <span className="composite-k">focus</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.005}
+                          value={composite.depthFocus}
+                          onChange={(e) =>
+                            setComposite(file, { depthFocus: e.target.valueAsNumber })
+                          }
+                        />
+                        <span className="composite-v">{composite.depthFocus.toFixed(2)}</span>
+                      </div>
+                      <div className="composite-row">
+                        <span className="composite-k">width</span>
+                        <input
+                          type="range"
+                          min={0.005}
+                          max={0.5}
+                          step={0.005}
+                          value={composite.depthWidth}
+                          onChange={(e) =>
+                            setComposite(file, { depthWidth: e.target.valueAsNumber })
+                          }
+                        />
+                        <span className="composite-v">{composite.depthWidth.toFixed(2)}</span>
+                      </div>
+                      <div className="composite-row">
+                        <span className="composite-k">dim</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={composite.depthDim}
+                          onChange={(e) =>
+                            setComposite(file, { depthDim: e.target.valueAsNumber })
+                          }
+                        />
+                        <span className="composite-v">{composite.depthDim.toFixed(2)}</span>
+                      </div>
+                    </>
+                  )}
+
+                  {compositeKind === 'normal' && (
+                    <>
+                      <div className="composite-row composite-modes">
+                        <button
+                          className={`composite-mode ${composite.normalMode === 'clay' ? 'on' : ''}`}
+                          onClick={() => setComposite(file, { normalMode: 'clay' })}
+                        >
+                          clay
+                        </button>
+                        <button
+                          className={`composite-mode ${composite.normalMode === 'modulate' ? 'on' : ''}`}
+                          onClick={() => setComposite(file, { normalMode: 'modulate' })}
+                        >
+                          modulate
+                        </button>
+                      </div>
+                      <div className="composite-row">
+                        <span className="composite-k">ambient</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={composite.ambient}
+                          onChange={(e) =>
+                            setComposite(file, { ambient: e.target.valueAsNumber })
+                          }
+                        />
+                        <span className="composite-v">{composite.ambient.toFixed(2)}</span>
+                      </div>
+                      <div className="composite-hint">
+                        drag image to aim light · space/middle-drag pans
+                      </div>
+                    </>
+                  )}
+                </>
+              ))}
           </div>
         )}
         {showChip && (
