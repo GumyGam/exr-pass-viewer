@@ -39,9 +39,19 @@ export type CompositeSettings = {
   depthDim: number; // 0..1 out-of-focus brightness floor
   // normal relight
   normalMode: 'clay' | 'modulate';
-  lightAzimuth: number; // degrees 0..360
-  lightElevation: number; // degrees -90..90
+  /** directional = single global light dir (sphere widget); point = 3D point
+   *  light at a reconstructed/position-pass surface anchor. */
+  lightMode: 'directional' | 'point';
+  lightAzimuth: number; // degrees 0..360 (directional)
+  lightElevation: number; // degrees -90..90 (directional)
   ambient: number; // 0..1
+  // point-light (3D) relight
+  anchorU: number; // 0..1 clicked anchor pixel (x), top-left origin
+  anchorV: number; // 0..1 clicked anchor pixel (y), top-left origin
+  pointHeight: number; // 0..1 off-surface distance along the anchor normal
+  pointRange: number; // 0..1 falloff reach
+  pointIntensity: number; // 0..2 brightness multiplier
+  fov: number; // vertical FOV degrees, used only when reconstructing P from depth
 };
 
 export const DEFAULT_COMPOSITE: CompositeSettings = {
@@ -53,9 +63,16 @@ export const DEFAULT_COMPOSITE: CompositeSettings = {
   depthWidth: 0.1,
   depthDim: 0.15,
   normalMode: 'clay',
+  lightMode: 'directional',
   lightAzimuth: 90,
   lightElevation: 45,
   ambient: 0.15,
+  anchorU: 0.5,
+  anchorV: 0.5,
+  pointHeight: 0.3,
+  pointRange: 0.5,
+  pointIntensity: 1,
+  fov: 50,
 };
 
 /** Convert azimuth/elevation degrees to a light direction in the normals'

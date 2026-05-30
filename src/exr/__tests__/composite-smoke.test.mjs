@@ -17,9 +17,8 @@ const repoRoot = resolve(__dirname, '../../..');
 const { compositeKindFor, resolveBeautyBase } = await import(
   pathToFileURL(resolve(repoRoot, 'src/exr/passes.ts')).href
 );
-const { compositeAoFrag, compositeDepthFrag, compositeNormalFrag } = await import(
-  pathToFileURL(resolve(repoRoot, 'src/webgl/shaders.ts')).href
-);
+const { compositeAoFrag, compositeDepthFrag, compositeNormalFrag, compositeRelightPointFrag } =
+  await import(pathToFileURL(resolve(repoRoot, 'src/webgl/shaders.ts')).href);
 
 let failures = 0;
 function assert(cond, label, detail) {
@@ -91,6 +90,21 @@ assert(nrm.includes('uniform sampler2D uCh5;'), 'normal frag declares uCh5 (beau
 assert(
   nrm.includes('uLightDir') && nrm.includes('uAmbient') && nrm.includes('uMode'),
   'normal frag uniforms',
+);
+
+const pt = compositeRelightPointFrag();
+assert(
+  pt.includes('uniform sampler2D uCh8;'),
+  'point frag declares uCh8 (beauty + normal + aux = 9)',
+);
+assert(!pt.includes('uCh9'), 'point frag has no uCh9');
+assert(
+  pt.includes('uLightPos') &&
+    pt.includes('uRange') &&
+    pt.includes('uIntensity') &&
+    pt.includes('uReconstruct') &&
+    pt.includes('uTanHalfFov'),
+  'point frag uniforms',
 );
 
 console.log(failures === 0 ? '\ncomposite-smoke: PASS' : `\ncomposite-smoke: ${failures} FAILURE(S)`);

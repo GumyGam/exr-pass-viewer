@@ -7,6 +7,7 @@ import {
   renderPassToCanvas,
 } from '../api/local';
 import { compositeKindFor, resolveBeautyBase } from '../exr/passes';
+import { LightSphere } from './LightSphere';
 import {
   DEFAULT_COMPOSITE,
   lightDirFromAngles,
@@ -93,14 +94,34 @@ export function PanelTile({ file }: { file: string }) {
   const compositeActive = !!compositeKind && composite.enabled && !!basePass && !!localPass;
   const relightActive = compositeKind === 'normal' && composite.enabled;
 
+  // Auxiliary pass for point-light relight: prefer a Position pass (exact),
+  // else a depth pass (reconstructed). null disables the point sub-mode.
+  const auxPass = useMemo(() => {
+    if (compositeKind !== 'normal' || !passesData) return null;
+    const pos = passesData.passes.find((p) => p.family === 'POS');
+    if (pos) return { pass: pos, isPosition: true };
+    const depth = passesData.passes.find(
+      (p) => compositeKindFor({ display_name: p.display_name, family: p.family }) === 'depth',
+    );
+    if (depth) return { pass: depth, isPosition: false };
+    return null;
+  }, [compositeKind, passesData]);
+  const pointActive = relightActive && composite.lightMode === 'point' && !!auxPass;
+
   const [img, setImg] = useState<ImgState>({ kind: 'idle' });
   const [chipPos, setChipPos] = useState<{ x: number; y: number } | null>(null);
+  // Screen position of the point-light anchor marker, computed in an effect so
+  // it tracks pan/zoom + anchor without reading layout during render.
+  const [markerPos, setMarkerPos] = useState<{ left: number; top: number } | null>(null);
   const debounceRef = useRef<number | null>(null);
   const pixelDebounceRef = useRef<number | null>(null);
   const dragRef = useRef<{ startX: number; startY: number; px: number; py: number; moved: boolean } | null>(null);
-  // Active relight light-aim drag (normal composite mode). Holds the gesture
-  // start + the azimuth/elevation at grab time.
+  // Active relight light-aim drag (directional mode). Holds the gesture start
+  // + the azimuth/elevation at grab time.
   const lightDragRef = useRef<{ startX: number; startY: number; az: number; el: number } | null>(null);
+  // Active point-light anchor drag (point mode): true while dragging the light
+  // anchor across the image.
+  const anchorDragRef = useRef(false);
   // Spacebar-held flag — lets space+drag pan while left-drag aims the light.
   const spaceRef = useRef(false);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -161,6 +182,15 @@ export function PanelTile({ file }: { file: string }) {
           lightDir: lightDirFromAngles(composite.lightAzimuth, composite.lightElevation),
           ambient: composite.ambient,
           normalMode: composite.normalMode,
+          lightMode: composite.lightMode,
+          auxPass: pointActive ? auxPass!.pass : undefined,
+          auxIsPosition: auxPass?.isPosition,
+          anchorU: composite.anchorU,
+          anchorV: composite.anchorV,
+          pointHeight: composite.pointHeight,
+          pointRange: composite.pointRange,
+          pointIntensity: composite.pointIntensity,
+          fov: composite.fov,
         });
       } else if (cryptoMaskActive) {
         job = renderCryptoMask(file, localPass, cryptoPicks.map((p) => p.hash_hex), {
@@ -232,6 +262,8 @@ export function PanelTile({ file }: { file: string }) {
     compositeKind,
     basePass,
     composite,
+    pointActive,
+    auxPass,
   ]);
 
   // Native wheel listener (passive: false) — React's synthetic wheel handler is
@@ -253,9 +285,47 @@ export function PanelTile({ file }: { file: string }) {
     return () => el.removeEventListener('wheel', handler);
   }, [setPanZoom]);
 
+  // Position the point-light anchor marker in screen space, tracking pan/zoom +
+  // anchor. Computed in an effect (refs are legitimate here) and mirrors the
+  // pixel<->screen mapping used for picking, inverted.
+  useEffect(() => {
+    const body = bodyRef.current;
+    const nat = imgNaturalRef.current;
+    if (!pointActive || img.kind !== 'ready' || !body || !nat) {
+      setMarkerPos(null);
+      return;
+    }
+    const rect = body.getBoundingClientRect();
+    const fitScale = Math.min(rect.width / nat.w, rect.height / nat.h);
+    const eff = fitScale * panZoom.scale;
+    setMarkerPos({
+      left: rect.width / 2 + panZoom.x + (composite.anchorU * nat.w - nat.w / 2) * eff,
+      top: rect.height / 2 + panZoom.y + (composite.anchorV * nat.h - nat.h / 2) * eff,
+    });
+  }, [pointActive, img, panZoom, composite.anchorU, composite.anchorV]);
+
+  // Map a client point to the normalized image anchor (0..1, top-left origin)
+  // and store it as the point-light anchor.
+  const setAnchorFromEvent = (clientX: number, clientY: number) => {
+    const body = bodyRef.current;
+    const nat = imgNaturalRef.current;
+    if (!body || !nat) return;
+    const rect = body.getBoundingClientRect();
+    const localX = clientX - rect.left - rect.width / 2 - panZoomRef.current.x;
+    const localY = clientY - rect.top - rect.height / 2 - panZoomRef.current.y;
+    const fitScale = Math.min(rect.width / nat.w, rect.height / nat.h);
+    const eff = fitScale * panZoomRef.current.scale;
+    const px = localX / eff + nat.w / 2;
+    const py = localY / eff + nat.h / 2;
+    setComposite(file, {
+      anchorU: Math.min(1, Math.max(0, px / nat.w)),
+      anchorV: Math.min(1, Math.max(0, py / nat.h)),
+    });
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     // Middle button or space-held always pans. In relight mode, plain left-drag
-    // aims the light instead.
+    // aims the light (directional) or moves the light anchor (point) instead.
     if (e.button !== 0 && e.button !== 1) return;
     // Ignore presses that land on the floating controls (composite panel /
     // crypto picker) — otherwise dragging a slider would also aim the light or
@@ -264,12 +334,17 @@ export function PanelTile({ file }: { file: string }) {
     e.currentTarget.setPointerCapture?.(e.pointerId);
     const wantPan = e.button === 1 || spaceRef.current || !relightActive;
     if (!wantPan && e.button === 0) {
-      lightDragRef.current = {
-        startX: e.clientX,
-        startY: e.clientY,
-        az: composite.lightAzimuth,
-        el: composite.lightElevation,
-      };
+      if (pointActive) {
+        anchorDragRef.current = true;
+        setAnchorFromEvent(e.clientX, e.clientY);
+      } else {
+        lightDragRef.current = {
+          startX: e.clientX,
+          startY: e.clientY,
+          az: composite.lightAzimuth,
+          el: composite.lightElevation,
+        };
+      }
       return;
     }
     dragRef.current = {
@@ -282,6 +357,10 @@ export function PanelTile({ file }: { file: string }) {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (anchorDragRef.current) {
+      setAnchorFromEvent(e.clientX, e.clientY);
+      return;
+    }
     if (lightDragRef.current) {
       const d = lightDragRef.current;
       // Drag right -> sweep azimuth; drag up -> raise elevation. ~0.5°/px.
@@ -339,6 +418,10 @@ export function PanelTile({ file }: { file: string }) {
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (anchorDragRef.current) {
+      anchorDragRef.current = false;
+      return;
+    }
     if (lightDragRef.current) {
       lightDragRef.current = null;
       return;
@@ -409,6 +492,7 @@ export function PanelTile({ file }: { file: string }) {
     return { left: Math.max(4, left), top: Math.max(4, top) } as const;
   })();
 
+
   return (
     <div
       className="panel"
@@ -456,6 +540,7 @@ export function PanelTile({ file }: { file: string }) {
             }}
           />
         )}
+        {pointActive && markerPos && <div className="light-marker" style={markerPos} />}
         {passInfo && (
           <div className="panel-overlay">
             {passesData && (
@@ -625,6 +710,22 @@ export function PanelTile({ file }: { file: string }) {
                           modulate
                         </button>
                       </div>
+                      <div className="composite-row composite-modes">
+                        <button
+                          className={`composite-mode ${composite.lightMode === 'directional' ? 'on' : ''}`}
+                          onClick={() => setComposite(file, { lightMode: 'directional' })}
+                        >
+                          directional
+                        </button>
+                        <button
+                          className={`composite-mode ${composite.lightMode === 'point' ? 'on' : ''}`}
+                          disabled={!auxPass}
+                          title={auxPass ? '' : 'needs a Position or Depth pass'}
+                          onClick={() => auxPass && setComposite(file, { lightMode: 'point' })}
+                        >
+                          point (3D)
+                        </button>
+                      </div>
                       <div className="composite-row">
                         <span className="composite-k">ambient</span>
                         <input
@@ -633,15 +734,95 @@ export function PanelTile({ file }: { file: string }) {
                           max={1}
                           step={0.01}
                           value={composite.ambient}
-                          onChange={(e) =>
-                            setComposite(file, { ambient: e.target.valueAsNumber })
-                          }
+                          onChange={(e) => setComposite(file, { ambient: e.target.valueAsNumber })}
                         />
                         <span className="composite-v">{composite.ambient.toFixed(2)}</span>
                       </div>
-                      <div className="composite-hint">
-                        drag image to aim light · space/middle-drag pans
-                      </div>
+
+                      {composite.lightMode === 'point' && auxPass ? (
+                        <>
+                          <div className="composite-row">
+                            <span className="composite-k">height</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={composite.pointHeight}
+                              onChange={(e) =>
+                                setComposite(file, { pointHeight: e.target.valueAsNumber })
+                              }
+                            />
+                            <span className="composite-v">{composite.pointHeight.toFixed(2)}</span>
+                          </div>
+                          <div className="composite-row">
+                            <span className="composite-k">range</span>
+                            <input
+                              type="range"
+                              min={0.02}
+                              max={1}
+                              step={0.01}
+                              value={composite.pointRange}
+                              onChange={(e) =>
+                                setComposite(file, { pointRange: e.target.valueAsNumber })
+                              }
+                            />
+                            <span className="composite-v">{composite.pointRange.toFixed(2)}</span>
+                          </div>
+                          <div className="composite-row">
+                            <span className="composite-k">intensity</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={2}
+                              step={0.01}
+                              value={composite.pointIntensity}
+                              onChange={(e) =>
+                                setComposite(file, { pointIntensity: e.target.valueAsNumber })
+                              }
+                            />
+                            <span className="composite-v">
+                              {composite.pointIntensity.toFixed(2)}
+                            </span>
+                          </div>
+                          {!auxPass.isPosition && (
+                            <div className="composite-row">
+                              <span className="composite-k">fov</span>
+                              <input
+                                type="range"
+                                min={10}
+                                max={120}
+                                step={1}
+                                value={composite.fov}
+                                onChange={(e) =>
+                                  setComposite(file, { fov: e.target.valueAsNumber })
+                                }
+                              />
+                              <span className="composite-v">{Math.round(composite.fov)}°</span>
+                            </div>
+                          )}
+                          <div className="composite-hint">
+                            click/drag image to place light · 3D from{' '}
+                            {auxPass.isPosition ? auxPass.pass.display_name : 'depth + FOV'}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="composite-sphere">
+                            <LightSphere
+                              azimuth={composite.lightAzimuth}
+                              elevation={composite.lightElevation}
+                              ambient={composite.ambient}
+                              onChange={(az, el) =>
+                                setComposite(file, { lightAzimuth: az, lightElevation: el })
+                              }
+                            />
+                          </div>
+                          <div className="composite-hint">
+                            drag sphere or image to aim light · space/middle-drag pans
+                          </div>
+                        </>
+                      )}
                     </>
                   )}
                 </>

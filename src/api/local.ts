@@ -179,15 +179,28 @@ export interface CompositeRenderOpts {
   depthFocus?: number;
   depthWidth?: number;
   depthDim?: number;
-  // normal
+  // normal — directional
   lightDir?: [number, number, number];
   ambient?: number;
   normalMode?: 'clay' | 'modulate';
+  // normal — point-light 3D
+  lightMode?: 'directional' | 'point';
+  /** Auxiliary pass for point relight: a Position pass (auxIsPosition = true)
+   *  or a depth pass (false). Omit to force directional. */
+  auxPass?: PassInfo;
+  auxIsPosition?: boolean;
+  anchorU?: number;
+  anchorV?: number;
+  pointHeight?: number;
+  pointRange?: number;
+  pointIntensity?: number;
+  fov?: number;
 }
 
 /** Composite an AO / depth / normal effect pass over a beauty base pass.
- *  Fetches both passes' channels (worker-cached after first decode) and renders
- *  on the main thread. */
+ *  Fetches the involved passes' channels (worker-cached after first decode) and
+ *  renders on the main thread. For point-light relight, also fetches the aux
+ *  Position/depth pass. */
 export async function renderCompositeToCanvas(
   path: string,
   basePass: PassInfo,
@@ -195,9 +208,11 @@ export async function renderCompositeToCanvas(
   opts: CompositeRenderOpts,
 ): Promise<ImageBitmap> {
   const meta = await loadFromPath(path);
-  const [beauty, effect] = await Promise.all([
+  const usePoint = opts.lightMode === 'point' && !!opts.auxPass;
+  const [beauty, effect, aux] = await Promise.all([
     getPassChannels(path, basePass),
     getPassChannels(path, effectPass),
+    usePoint ? getPassChannels(path, opts.auxPass!) : Promise.resolve(null),
   ]);
   const canvas = renderComposite(
     {
@@ -205,6 +220,7 @@ export async function renderCompositeToCanvas(
       height: meta.height,
       beautyChannels: beauty.array,
       effectChannels: effect.array,
+      auxChannels: aux?.array,
     },
     {
       kind: opts.kind,
@@ -220,6 +236,15 @@ export async function renderCompositeToCanvas(
       lightDir: opts.lightDir,
       ambient: opts.ambient,
       normalMode: opts.normalMode,
+      lightMode: opts.lightMode,
+      auxIsPosition: opts.auxIsPosition,
+      anchorU: opts.anchorU,
+      anchorV: opts.anchorV,
+      pointHeight: opts.pointHeight,
+      pointRange: opts.pointRange,
+      pointIntensity: opts.pointIntensity,
+      fov: opts.fov,
+      auxCacheKey: usePoint ? `${path}::${opts.auxPass!.name}::p2_p98` : undefined,
     },
   );
   return canvas.transferToImageBitmap();

@@ -18,6 +18,7 @@ import {
   compositeAoFrag,
   compositeDepthFrag,
   compositeNormalFrag,
+  compositeRelightPointFrag,
   cryptoFrag,
   falsecolorFrag,
   hashidFrag,
@@ -144,6 +145,9 @@ export interface CompositeInput {
   height: number;
   beautyChannels: Float32Array[];
   effectChannels: Float32Array[];
+  /** Auxiliary pass for point-light relight: a Position pass (xyz) or a depth
+   *  scalar (single channel). Only read when params.lightMode === 'point'. */
+  auxChannels?: Float32Array[];
 }
 
 export interface CompositeParams {
@@ -162,10 +166,24 @@ export interface CompositeParams {
   depthDim?: number;
   /** Stable cache key for the depth percentile range. */
   depthCacheKey?: string;
-  // normal
+  // normal — directional
   lightDir?: [number, number, number];
   ambient?: number;
   normalMode?: 'clay' | 'modulate';
+  // normal — point-light 3D
+  lightMode?: 'directional' | 'point';
+  /** true: auxChannels is a Position pass (xyz used directly). false: depth
+   *  scalar, reconstructed with fov. */
+  auxIsPosition?: boolean;
+  anchorU?: number;
+  anchorV?: number;
+  pointHeight?: number;
+  pointRange?: number;
+  pointIntensity?: number;
+  /** Vertical FOV in degrees for depth reconstruction. */
+  fov?: number;
+  /** Stable cache key for the aux percentile range(s). */
+  auxCacheKey?: string;
 }
 
 /** Expand a beauty pass's channels into exactly three (r,g,b) arrays, matching
@@ -236,19 +254,118 @@ export function renderComposite(input: CompositeInput, params: CompositeParams):
     const nx = effectChannels[0] ?? new Float32Array(total);
     const ny = effectChannels[1] ?? new Float32Array(total);
     const nz = effectChannels[2] ?? new Float32Array(total);
-    call = {
-      fragSrc: compositeNormalFrag(),
-      channelData: [br, bg, bb, nx, ny, nz],
-      srcWidth: width,
-      srcHeight: height,
-      uniformsFloat: {
-        uExposure: exposure,
-        uGamma: gamma,
-        uAmbient: params.ambient ?? 0.15,
-        uMode: params.normalMode === 'modulate' ? 1 : 0,
-      },
-      uniformsVec3: { uLightDir: params.lightDir ?? [0, 0.7, 0.7] },
-    };
+
+    if (params.lightMode === 'point' && input.auxChannels && input.auxChannels.length > 0) {
+      const aux = input.auxChannels;
+      const auxIsPos = !!params.auxIsPosition;
+      const ax = aux[0] ?? new Float32Array(total);
+      const ay = auxIsPos ? (aux[1] ?? new Float32Array(total)) : ax;
+      const az = auxIsPos ? (aux[2] ?? new Float32Array(total)) : ax;
+
+      const aspect = width / height;
+      const fovRad = ((params.fov ?? 50) * Math.PI) / 180;
+      const tanY = Math.tan(fovRad / 2);
+      const tanX = tanY * aspect;
+
+      // Anchor pixel (clamped). floor(au*width) matches the shader's NEAREST
+      // texel pick floor(vUv*srcW), so the CPU reads the same texel the GPU
+      // reconstructs.
+      const au = Math.min(1, Math.max(0, params.anchorU ?? 0.5));
+      const av = Math.min(1, Math.max(0, params.anchorV ?? 0.5));
+      const px = Math.min(width - 1, Math.max(0, Math.floor(au * width)));
+      const py = Math.min(height - 1, Math.max(0, Math.floor(av * height)));
+      const aidx = py * width + px;
+
+      // Anchor surface normal (normalized). Matches the shader's +Z fallback
+      // for a degenerate (zero) normal so clicking a background pixel behaves
+      // the same CPU- and GPU-side.
+      let nXa = nx[aidx] ?? 0;
+      let nYa = ny[aidx] ?? 0;
+      let nZa = nz[aidx] ?? 0;
+      const nl = Math.hypot(nXa, nYa, nZa);
+      if (nl > 1e-6) {
+        nXa /= nl;
+        nYa /= nl;
+        nZa /= nl;
+      } else {
+        nXa = 0;
+        nYa = 0;
+        nZa = 1;
+      }
+
+      // Anchor surface position + a characteristic scene scale (a single-axis
+      // extent) so the height / range sliders read the same whether the aux is
+      // a Position pass or a reconstructed depth pass.
+      let pax: number;
+      let pay: number;
+      let paz: number;
+      let sceneScale: number;
+      const auxKey = params.auxCacheKey;
+      if (auxIsPos) {
+        pax = ax[aidx] ?? 0;
+        pay = ay[aidx] ?? 0;
+        paz = az[aidx] ?? 0;
+        const [loX, hiX] = computePercentileRange(ax, auxKey ? `${auxKey}::0` : undefined);
+        const [loY, hiY] = computePercentileRange(ay, auxKey ? `${auxKey}::1` : undefined);
+        const [loZ, hiZ] = computePercentileRange(az, auxKey ? `${auxKey}::2` : undefined);
+        // Largest per-axis span — comparable in magnitude to the depth branch's
+        // single-axis span (the diagonal would over-scale by ~sqrt(3)).
+        sceneScale = Math.max(hiX - loX, hiY - loY, hiZ - loZ) || 1;
+      } else {
+        const depthA = ax[aidx] ?? 0;
+        // ndc from the texel CENTER so CPU P matches the shader's P exactly.
+        const ucx = (px + 0.5) / width;
+        const ucy = (py + 0.5) / height;
+        const ndcX = ucx * 2 - 1;
+        const ndcY = (1 - ucy) * 2 - 1;
+        pax = ndcX * tanX * depthA;
+        pay = ndcY * tanY * depthA;
+        paz = -depthA;
+        const [lo, hi] = computePercentileRange(ax, auxKey);
+        sceneScale = hi - lo || 1;
+      }
+
+      const heightWorld = (params.pointHeight ?? 0.3) * 2 * sceneScale;
+      const rangeWorld = (params.pointRange ?? 0.5) * 4 * sceneScale + 1e-4;
+      const lightPos: [number, number, number] = [
+        pax + nXa * heightWorld,
+        pay + nYa * heightWorld,
+        paz + nZa * heightWorld,
+      ];
+
+      call = {
+        fragSrc: compositeRelightPointFrag(),
+        // Depth-only aux is replicated into 3 slots; only uCh6 is read.
+        channelData: [br, bg, bb, nx, ny, nz, ax, ay, az],
+        srcWidth: width,
+        srcHeight: height,
+        uniformsFloat: {
+          uExposure: exposure,
+          uGamma: gamma,
+          uAmbient: params.ambient ?? 0.15,
+          uMode: params.normalMode === 'modulate' ? 1 : 0,
+          uRange: rangeWorld,
+          uIntensity: params.pointIntensity ?? 1,
+          uReconstruct: auxIsPos ? 0 : 1,
+        },
+        uniformsVec2: { uTanHalfFov: [tanX, tanY] },
+        uniformsVec3: { uLightPos: lightPos },
+      };
+    } else {
+      call = {
+        fragSrc: compositeNormalFrag(),
+        channelData: [br, bg, bb, nx, ny, nz],
+        srcWidth: width,
+        srcHeight: height,
+        uniformsFloat: {
+          uExposure: exposure,
+          uGamma: gamma,
+          uAmbient: params.ambient ?? 0.15,
+          uMode: params.normalMode === 'modulate' ? 1 : 0,
+        },
+        uniformsVec3: { uLightDir: params.lightDir ?? [0, 0.7, 0.7] },
+      };
+    }
   }
 
   const r = getRenderer(outW, outH);

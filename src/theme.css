@@ -1058,10 +1058,48 @@ select {
   color: var(--text-0);
   background: rgba(255, 255, 255, 0.06);
 }
+.composite-mode:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .composite-hint {
   margin-top: 6px;
   color: var(--text-3);
   font-style: italic;
+}
+.composite-sphere {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+.light-sphere {
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.25);
+}
+/* Point-light anchor marker — a ring centred on the light's image anchor. */
+.light-marker {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  margin-top: -7px;
+  border-radius: 50%;
+  border: 1.5px solid #ffd44d;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  z-index: 11;
+}
+.light-marker::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  margin-left: -1px;
+  margin-top: -1px;
+  background: #ffd44d;
+  border-radius: 50%;
 }
 
 /* Hover chip — follows cursor, shows active pass values for focused panel only */

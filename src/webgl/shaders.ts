@@ -445,3 +445,52 @@ void main() {
 }
 `;
 }
+
+// ----- COMPOSITE: POINT-LIGHT 3D RELIGHT --------------------------------------
+// Beauty RGB in uCh0..2, normal XYZ in uCh3..5, auxiliary position data in
+// uCh6..8. A point light sits at uLightPos (CPU-computed: anchor surface point
+// + normal * height). Per-pixel surface position P comes either from a Position
+// pass (uReconstruct == 0, read uCh6..8 directly) or reconstructed from a depth
+// scalar (uReconstruct == 1, uCh6 = depth) using uTanHalfFov + the fullscreen
+// UV. L and distance are per-pixel, so the light wraps around forms.
+//   P      = uReconstruct ? ray(uv) * depth : aux.xyz
+//   d      = |uLightPos - P|;  L = (uLightPos - P) / d
+//   atten  = (clamp(1 - d/uRange, 0, 1))^2
+//   shade  = uAmbient + (1 - uAmbient) * max(dot(N,L),0) * atten * uIntensity
+//   out    = uMode>0.5 ? tonemap(beauty)*shade : vec3(0.7)*shade
+export function compositeRelightPointFrag(): string {
+  const extras =
+    'uniform float uExposure;\nuniform float uGamma;\nuniform float uAmbient;\nuniform float uMode;\n' +
+    'uniform vec3 uLightPos;\nuniform float uRange;\nuniform float uIntensity;\n' +
+    'uniform float uReconstruct;\nuniform vec2 uTanHalfFov;';
+  return fragHead(9, extras) + /* glsl */ `
+
+vec3 surfacePos() {
+  if (uReconstruct > 0.5) {
+    float depth = sampleCh(uCh6);
+    float ndcX = vUv.x * 2.0 - 1.0;
+    float ndcY = (1.0 - vUv.y) * 2.0 - 1.0;
+    // View-space pinhole: camera at origin looking down -Z. P.z = -depth.
+    vec3 ray = vec3(ndcX * uTanHalfFov.x, ndcY * uTanHalfFov.y, -1.0);
+    return ray * depth;
+  }
+  return vec3(sampleCh(uCh6), sampleCh(uCh7), sampleCh(uCh8));
+}
+
+void main() {
+  vec3 beauty = toneBeauty(vec3(sampleCh(uCh0), sampleCh(uCh1), sampleCh(uCh2)), uExposure, uGamma);
+  vec3 N = vec3(sampleCh(uCh3), sampleCh(uCh4), sampleCh(uCh5));
+  float nlen = length(N);
+  N = (nlen > 1e-6) ? N / nlen : vec3(0.0, 0.0, 1.0);
+  vec3 P = surfacePos();
+  vec3 toL = uLightPos - P;
+  float d = length(toL);
+  vec3 L = (d > 1e-6) ? toL / d : vec3(0.0, 0.0, 1.0);
+  float lambert = max(dot(N, L), 0.0);
+  float atten = pow(clamp(1.0 - d / max(uRange, 1e-6), 0.0, 1.0), 2.0);
+  float shade = uAmbient + (1.0 - uAmbient) * lambert * atten * uIntensity;
+  vec3 outc = (uMode > 0.5) ? (beauty * shade) : (vec3(0.7) * shade);
+  outColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
+}
+`;
+}
